@@ -1,0 +1,17 @@
+{
+    "name": "terplayer",
+    "version": "1.0.0",
+    "private": true,
+    "type": "module",
+    "scripts": {
+        "start": "node player.js",
+        "check": "node --check player.js",
+        "test": "node --test",
+        "test:watch": "node --test --watch"
+    },
+    "dependencies": {
+        "ink": "^5.2.1",
+        "music-metadata": "^10.6.0",
+        "react": "^18.3.1"
+    }
+}
