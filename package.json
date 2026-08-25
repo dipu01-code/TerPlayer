@@ -10,6 +10,7 @@
         "test:watch": "node --test --watch"
     },
     "dependencies": {
+        "audio": "^2.6.8",
         "ink": "^5.2.1",
         "music-metadata": "^10.6.0",
         "react": "^18.3.1"
