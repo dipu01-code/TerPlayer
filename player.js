@@ -476,7 +476,6 @@ const App = ({ tracks }) => {
         setStatusMessage(
           `Playing: ${track.title}`
         );
-
         pushActivity(
           `Playing: ${track.title}`
         );
