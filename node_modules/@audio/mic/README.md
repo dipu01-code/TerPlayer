@@ -1,5 +1,7 @@
 # @audio/mic
 
+Try it in the browser: [Tuner](https://audiojs.dev/util/tuner/), [Audio recorder](https://audiojs.dev/util/recorder/), [Room and speaker measurement](https://audiojs.dev/util/measure/). Runs on this package, nothing is uploaded.
+
 Capture audio from microphone in node or browser.
 
 ## Usage

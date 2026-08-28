@@ -3,7 +3,7 @@ import { accessSync } from 'node:fs';
 
 const FFPLAY_CANDIDATES = ['ffplay', '/opt/homebrew/bin/ffplay', '/usr/local/bin/ffplay'];
 
-const resolveFfplay = () => {
+export const resolveFfplay = () => {
     for (const candidate of FFPLAY_CANDIDATES) {
         try {
             accessSync(candidate, 1);

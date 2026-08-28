@@ -1,9 +1,9 @@
 {
   "name": "@audio/note",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "type": "module",
   "sideEffects": false,
-  "description": "Music-theory primitives — Hz ↔ MIDI ↔ name, cents, scales, pitch snapping",
+  "description": "Music-theory primitives \u2014 Hz \u2194 MIDI \u2194 name, cents, scales, pitch snapping",
   "main": "index.js",
   "exports": {
     ".": "./index.js",

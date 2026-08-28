@@ -1,0 +1,9 @@
+node_modules/
+songs/
+newPlayer.js
+test/
+.git/
+.gitignore
+.DS_Store
+.env
+*.log

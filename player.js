@@ -17,7 +17,6 @@ import {
 } from 'ink';
 
 import TextInput from 'ink-text-input';
-import audio from 'audio';
 
 import {
     clamp,
@@ -28,9 +27,8 @@ import {
     wrapIndex,
 } from './src/player-core.js';
 
-import { playFfplay } from './src/ffplay-player.js';
 import { searchTracks } from './src/stream-search.js';
-import { getYouTubeAudioUrl } from './src/youtube-stream.js';
+import { playYouTube } from './src/youtube-player.js';
 
 const h = React.createElement;
 
@@ -42,10 +40,10 @@ const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 const HEADER_COLORS = ['cyan', 'blue', 'magenta', 'magenta', 'red', 'red'];
 
 const HEADER_LINES = [
-    '> MUSIC PLAYER',
+    '> TERPLAYER',
     '',
-    '  █▀▄▀█ █ █ █▀▀ █▀█ █▀▀ █▀▀ █▀█ █▀▀ █▀█',
-    '  █ ▀ █ █▄█ ██▄ █▀▀ ██▄ ██▄ █▀▄ ██▄ █▀▄',
+    '  ▀█▀ █▀▀ █▀█ ▀█▀ █▀▀ █   █▀▀ █▀█',
+    '   █  ██▄ █▀▄  █  ██▄ █▄▄ ██▀ █▀▄',
 ];
 
 const TIPS = [
@@ -227,8 +225,7 @@ const App = () => {
                         throw new Error('Missing YouTube video id.');
                     }
 
-                    const { url, durationSec: resolvedDuration } = await getYouTubeAudioUrl(track.videoId);
-                    const finalDuration = resolvedDuration ?? track.durationSec ?? null;
+                    const finalDuration = track.durationSec ?? null;
 
                     if (playToken !== playTokenRef.current) {
                         return;
@@ -237,7 +234,7 @@ const App = () => {
                     setDurationSec(finalDuration);
                     setIsBuffering(false);
 
-                    const handle = playFfplay(url, {
+                    const handle = playYouTube(track.videoId, {
                         onEnd: () => {
                             if (playToken !== playTokenRef.current || manualStopRef.current) {
                                 return;

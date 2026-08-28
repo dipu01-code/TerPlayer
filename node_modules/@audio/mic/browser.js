@@ -55,7 +55,9 @@ export default async function mic(opts = {}) {
     node = new AudioWorkletNode(ctx, 'mic-processor', {
       numberOfInputs: 1,
       numberOfOutputs: 0,
-      channelCount: channels
+      channelCount: channels,
+      channelCountMode: 'explicit', // stereo devices are mixed down to the requested count, not interleaved as-is
+      channelInterpretation: 'speakers'
     })
     source.connect(node)
 

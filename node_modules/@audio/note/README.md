@@ -1,5 +1,7 @@
 # @audio/note
 
+Try it in the browser: [Tuner](https://audiojs.dev/util/tuner/). Runs on this package, nothing is uploaded.
+
 > Music-theory primitives: Hz ↔ MIDI ↔ note name, cents, scales, snapping.
 
 ```js

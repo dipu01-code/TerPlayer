@@ -1,20 +1,39 @@
 {
     "name": "terplayer",
     "version": "1.0.0",
-    "private": true,
+    "description": "A terminal-based music player that searches and streams music.",
     "type": "module",
+    "main": "player.js",
+    "bin": {
+        "terplayer": "./player.js"
+    },
     "scripts": {
         "start": "node player.js",
-        "check": "node --check player.js",
-        "test": "node --test",
-        "test:watch": "node --test --watch"
+        "test": "node --test"
     },
+    "keywords": [
+        "music",
+        "terminal",
+        "player",
+        "cli",
+        "youtube",
+        "streaming"
+    ],
+    "author": "dipu01-code",
+    "license": "MIT",
+    "repository": {
+        "type": "git",
+        "url": "git+https://github.com/dipu01-code/TerPlayer.git"
+    },
+    "bugs": {
+        "url": "https://github.com/dipu01-code/TerPlayer/issues"
+    },
+    "homepage": "https://github.com/dipu01-code/TerPlayer#readme",
     "dependencies": {
         "audio": "^2.6.8",
         "ink": "^5.2.1",
         "ink-text-input": "^6.0.0",
         "react": "^18.3.1",
-        "youtubei.js": "^18.0.0",
         "yt-search": "^2.13.1"
     }
 }

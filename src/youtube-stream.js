@@ -4,7 +4,10 @@ let innertubePromise = null;
 
 const getInnertube = () => {
     if (!innertubePromise) {
-        innertubePromise = Innertube.create({ generate_session_locally: true });
+        innertubePromise = Innertube.create({ generate_session_locally: true }).catch((error) => {
+            innertubePromise = null;
+            throw error;
+        });
     }
 
     return innertubePromise;
