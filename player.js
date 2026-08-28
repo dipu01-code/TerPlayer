@@ -1,2176 +1,802 @@
 #!/usr/bin/env node
 
-import fs from "node:fs";
-import path from "node:path";
-
 import React, {
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
 
 import {
-  Box,
-  Text,
-  render,
-  useApp,
-  useInput,
-} from "ink";
+    Box,
+    Text,
+    render,
+    useApp,
+    useInput,
+} from 'ink';
 
-import audio from "audio";
-import { parseFile } from "music-metadata";
+import TextInput from 'ink-text-input';
+import audio from 'audio';
 
 import {
-  SUPPORTED_EXTENSIONS,
-  clamp,
-  wrapIndex,
-  formatTime,
-  formatDuration,
-  makeProgressBar,
-  stripExtension,
-  repeatLabel,
-  playbackLabel,
-  getVisibleTracks,
-  decideNextTrackIndex,
-  randomIndex,
-} from "./src/player-core.js";
+    clamp,
+    formatDuration,
+    formatTime,
+    makeProgressBar,
+    playbackLabel,
+    wrapIndex,
+} from './src/player-core.js';
+
+import { playFfplay } from './src/ffplay-player.js';
+import { searchTracks } from './src/stream-search.js';
+import { getYouTubeAudioUrl } from './src/youtube-stream.js';
 
 const h = React.createElement;
 
-const SONGS_DIR = path.join(process.cwd(), "songs");
+const PROGRESS_WIDTH = 34;
+const RESULTS_VIEW_SIZE = 7;
 
-const PROGRESS_WIDTH = 36;
-const MENU_VIEW_SIZE = 8;
+const SPINNER_FRAMES = ['|', '/', '-', '\\'];
 
-const SPINNER_FRAMES = [
-  "|",
-  "/",
-  "-",
-  "\\",
+const HEADER_COLORS = ['cyan', 'blue', 'magenta', 'magenta', 'red', 'red'];
+
+const HEADER_LINES = [
+    '> MUSIC PLAYER',
+    '',
+    '  █▀▄▀█ █ █ █▀▀ █▀█ █▀▀ █▀▀ █▀█ █▀▀ █▀█',
+    '  █ ▀ █ █▄█ ██▄ █▀▀ ██▄ ██▄ █▀▄ ██▄ █▀▄',
 ];
 
-const TITLE_BLOCK = [
-  "TTTTT EEEEE RRRR  PPPP  L      A   Y   Y EEEEE RRRR ",
-  "  T   E     R   R P   P L     A A   Y Y  E     R   R",
-  "  T   EEEE  RRRR  PPPP  L    AAAAA   Y   EEEE  RRRR ",
-  "  T   E     R  R  P     L    A   A   Y   E     R  R ",
-  "  T   EEEEE R   R P     LLLLLA   A   Y   EEEEE R   R",
+const TIPS = [
+    'Type any song (English or Hindi) below and press Enter to search YouTube.',
+    'After search: ↑/↓ pick a track · Enter play · Esc new search.',
+    'Streams play from the internet — nothing is saved to disk.',
+    'Space pause/resume · x stop · q quit',
 ];
 
-const ACCENT_COLORS = [
-  "cyan",
-  "magenta",
-  "yellow",
-  "blue",
-  "green",
-  "red",
-];
+const sourceLabel = (source) => {
+    if (source === 'audius') {
+        return 'Audius';
+    }
 
-const THEMES = [
-  {
-    name: "Aurora",
-    headerBorder: "cyan",
-    menuBorder: "magenta",
-    statusBorder: "yellow",
-    helpBorder: "blue",
-    title: "cyan",
-    selected: "cyan",
-    active: "green",
-    keyHint: "magenta",
-  },
+    if (source === 'archive') {
+        return 'Archive';
+    }
 
-  {
-    name: "Sunset",
-    headerBorder: "red",
-    menuBorder: "yellow",
-    statusBorder: "magenta",
-    helpBorder: "cyan",
-    title: "red",
-    selected: "yellow",
-    active: "green",
-    keyHint: "cyan",
-  },
+    if (source === 'youtube') {
+        return 'YouTube';
+    }
 
-  {
-    name: "Ocean",
-    headerBorder: "blue",
-    menuBorder: "cyan",
-    statusBorder: "green",
-    helpBorder: "magenta",
-    title: "blue",
-    selected: "cyan",
-    active: "green",
-    keyHint: "blue",
-  },
-];
-
-
-// ==================================================
-// LOAD TRACKS
-// ==================================================
-
-const loadTracks = async () => {
-  if (!fs.existsSync(SONGS_DIR)) {
-    throw new Error(
-      `Songs folder not found at ${SONGS_DIR}`
-    );
-  }
-
-  const files = fs
-    .readdirSync(SONGS_DIR)
-    .filter((file) =>
-      SUPPORTED_EXTENSIONS.has(
-        path.extname(file).toLowerCase()
-      )
-    );
-
-  if (files.length === 0) {
-    throw new Error(
-      "No supported audio files found in songs/. Add at least one song."
-    );
-  }
-
-  const tracks = files
-    .sort((a, b) =>
-      a.localeCompare(
-        b,
-        undefined,
-        {
-          sensitivity: "base",
-        }
-      )
-    )
-    .map((file, index) => {
-      const absolutePath = path.join(
-        SONGS_DIR,
-        file
-      );
-
-      return {
-        id: `${index}-${file}`,
-        index,
-        file,
-        title: stripExtension(file),
-        absolutePath,
-        durationSec: null,
-      };
-    });
-
-  return tracks;
+    return source;
 };
 
+const gradientColor = (index, total) =>
+    HEADER_COLORS[Math.min(HEADER_COLORS.length - 1, Math.floor((index / total) * HEADER_COLORS.length))];
 
-// ==================================================
-// MAIN APPLICATION
-// ==================================================
+const App = () => {
+    const { exit } = useApp();
 
-const App = ({ tracks }) => {
-  const { exit } = useApp();
+    const [query, setQuery] = useState('');
+    const [inputFocused, setInputFocused] = useState(true);
+    const [results, setResults] = useState([]);
+    const [selectedIndex, setSelectedIndex] = useState(0);
+    const [isSearching, setIsSearching] = useState(false);
+    const [searchError, setSearchError] = useState(null);
+    const [lastSearchQuery, setLastSearchQuery] = useState('');
 
+    const [currentTrack, setCurrentTrack] = useState(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [isPaused, setIsPaused] = useState(false);
+    const [isBuffering, setIsBuffering] = useState(false);
+    const [elapsedSec, setElapsedSec] = useState(0);
+    const [durationSec, setDurationSec] = useState(null);
+    const [spinnerIndex, setSpinnerIndex] = useState(0);
+    const [statusMessage, setStatusMessage] = useState('Ready — search for a song to start streaming.');
+    const [activityFeed, setActivityFeed] = useState(['Welcome to the terminal music streamer.']);
 
-  // -----------------------------------------------
-  // STATE
-  // -----------------------------------------------
+    const audioRef = useRef(null);
+    const ffplayRef = useRef(null);
+    const progressTimerRef = useRef(null);
+    const playbackStartedAtRef = useRef(0);
+    const searchAbortRef = useRef(null);
+    const playTokenRef = useRef(0);
+    const manualStopRef = useRef(false);
+    const shouldExitRef = useRef(false);
 
-  const [
-    selectedIndex,
-    setSelectedIndex,
-  ] = useState(0);
-
-  const [
-    currentIndex,
-    setCurrentIndex,
-  ] = useState(null);
-
-  const [
-    isPlaying,
-    setIsPlaying,
-  ] = useState(false);
-
-  const [
-    isPaused,
-    setIsPaused,
-  ] = useState(false);
-
-  const [
-    spinnerIndex,
-    setSpinnerIndex,
-  ] = useState(0);
-
-  const [
-    elapsedSec,
-    setElapsedSec,
-  ] = useState(0);
-
-  const [
-    themeIndex,
-    setThemeIndex,
-  ] = useState(0);
-
-  const [
-    shuffle,
-    setShuffle,
-  ] = useState(false);
-
-  const [
-    repeatMode,
-    setRepeatMode,
-  ] = useState("off");
-
-  const [
-    showHelp,
-    setShowHelp,
-  ] = useState(false);
-
-  const [
-    activityFeed,
-    setActivityFeed,
-  ] = useState([
-    "Welcome to TerPlayer.",
-  ]);
-
-  const [
-    trackDurations,
-    setTrackDurations,
-  ] = useState({});
-
-  const [
-    statusMessage,
-    setStatusMessage,
-  ] = useState(
-    "Select a track and press Enter to play."
-  );
-
-
-  // -----------------------------------------------
-  // REFS
-  // -----------------------------------------------
-
-  const audioRef = useRef(null);
-
-  const currentIndexRef =
-    useRef(currentIndex);
-
-  const shuffleRef =
-    useRef(shuffle);
-
-  const repeatModeRef =
-    useRef(repeatMode);
-
-  const shouldExitRef =
-    useRef(false);
-
-  const manualStopRef =
-    useRef(false);
-
-
-  // -----------------------------------------------
-  // SYNC REFS
-  // -----------------------------------------------
-
-  useEffect(() => {
-    currentIndexRef.current =
-      currentIndex;
-  }, [currentIndex]);
-
-
-  useEffect(() => {
-    shuffleRef.current =
-      shuffle;
-  }, [shuffle]);
-
-
-  useEffect(() => {
-    repeatModeRef.current =
-      repeatMode;
-  }, [repeatMode]);
-
-
-  // -----------------------------------------------
-  // ACTIVITY FEED
-  // -----------------------------------------------
-
-  const pushActivity = useCallback(
-    (message) => {
-      setActivityFeed(
-        (previous) =>
-          [message, ...previous].slice(0, 3)
-      );
-    },
-    []
-  );
-
-
-  // =================================================
-  // LOAD DURATIONS
-  // =================================================
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadDurationsInBackground =
-      async () => {
-
-        for (const track of tracks) {
-
-          if (cancelled) {
-            return;
-          }
-
-          if (
-            trackDurations[track.id] !==
-            undefined
-          ) {
-            continue;
-          }
-
-          try {
-            const metadata =
-              await parseFile(
-                track.absolutePath
-              );
-
-            if (cancelled) {
-              return;
-            }
-
-            const durationSec =
-              metadata.format.duration ??
-              null;
-
-            setTrackDurations(
-              (previous) => ({
-                ...previous,
-                [track.id]:
-                  durationSec,
-              })
-            );
-
-          } catch {
-
-            if (cancelled) {
-              return;
-            }
-
-            setTrackDurations(
-              (previous) => ({
-                ...previous,
-                [track.id]: null,
-              })
-            );
-          }
+    const clearProgressTimer = useCallback(() => {
+        if (progressTimerRef.current) {
+            clearInterval(progressTimerRef.current);
+            progressTimerRef.current = null;
         }
-      };
+    }, []);
 
-    loadDurationsInBackground();
+    const startProgressTimer = useCallback(
+        (duration) => {
+            clearProgressTimer();
+            playbackStartedAtRef.current = Date.now();
 
-    return () => {
-      cancelled = true;
-    };
+            progressTimerRef.current = setInterval(() => {
+                const elapsed = (Date.now() - playbackStartedAtRef.current) / 1000;
+                setElapsedSec(duration ? clamp(elapsed, 0, duration) : elapsed);
+            }, 250);
+        },
+        [clearProgressTimer],
+    );
 
-  }, [tracks, trackDurations]);
+    const pushActivity = useCallback((message) => {
+        setActivityFeed((previous) => [message, ...previous].slice(0, 4));
+    }, []);
 
-
-  // =================================================
-  // PLAY TRACK
-  // =================================================
-
-  const playTrack = useCallback(
-    async (index) => {
-
-      if (tracks.length === 0) {
-        return;
-      }
-
-
-      const safeIndex =
-        clamp(
-          index,
-          0,
-          tracks.length - 1
-        );
-
-
-      const track =
-        tracks[safeIndex];
-
-
-      // Stop current player
-
-      if (audioRef.current) {
-
+    const stopPlayback = useCallback(() => {
         manualStopRef.current = true;
+        playTokenRef.current += 1;
+        clearProgressTimer();
 
-        try {
-          audioRef.current.stop();
-        } catch {
-          // Ignore stop errors
+        if (ffplayRef.current) {
+            try {
+                ffplayRef.current.stop();
+            } catch {
+                // Ignore stop errors.
+            }
+
+            ffplayRef.current = null;
         }
 
-        try {
-          audioRef.current.dispose();
-        } catch {
-          // Ignore dispose errors
+        if (audioRef.current) {
+            try {
+                audioRef.current.stop();
+            } catch {
+                // Ignore stop errors.
+            }
+
+            try {
+                audioRef.current.dispose();
+            } catch {
+                // Ignore dispose errors.
+            }
+
+            audioRef.current = null;
         }
-
-        audioRef.current = null;
-      }
-
-
-      try {
-
-        // Create audio object
-
-        const player =
-          audio(
-            track.absolutePath
-          );
-
-
-        audioRef.current =
-          player;
-
-
-        manualStopRef.current =
-          false;
-
-
-        // Wait until the audio is decoded
-
-        await player;
-
-
-        // If another track replaced this one
-        // while loading, do nothing.
-
-        if (
-          audioRef.current !==
-          player
-        ) {
-          return;
-        }
-
-
-        // Start playback
-
-        player.play();
-
-
-        setCurrentIndex(
-          safeIndex
-        );
-
-        setSelectedIndex(
-          safeIndex
-        );
-
-        setElapsedSec(0);
-
-        setIsPlaying(true);
-
-        setIsPaused(false);
-
-
-        setStatusMessage(
-          `Playing: ${track.title}`
-        );
-        pushActivity(
-          `Playing: ${track.title}`
-        );
-
-
-        // -------------------------------------------
-        // TIME UPDATE
-        // -------------------------------------------
-
-        player.on(
-          "timeupdate",
-          (currentTime) => {
-
-            // Important:
-            // Update only if this is still
-            // the active audio instance.
-
-            if (
-              audioRef.current !==
-              player
-            ) {
-              return;
-            }
-
-            setElapsedSec(
-              Number(currentTime) || 0
-            );
-          }
-        );
-
-
-        // -------------------------------------------
-        // PLAY EVENT
-        // -------------------------------------------
-
-        player.on(
-          "play",
-          () => {
-
-            if (
-              audioRef.current !==
-              player
-            ) {
-              return;
-            }
-
-            setIsPlaying(true);
-
-            setIsPaused(false);
-          }
-        );
-
-
-        // -------------------------------------------
-        // PAUSE EVENT
-        // -------------------------------------------
-
-        player.on(
-          "pause",
-          () => {
-
-            if (
-              audioRef.current !==
-              player
-            ) {
-              return;
-            }
-
-            setIsPaused(true);
-          }
-        );
-
-
-        // -------------------------------------------
-        // TRACK ENDED
-        // -------------------------------------------
-
-        player.on(
-          "ended",
-          () => {
-
-            if (
-              audioRef.current !==
-              player
-            ) {
-              return;
-            }
-
-
-            if (
-              manualStopRef.current
-            ) {
-              return;
-            }
-
-
-            setIsPlaying(false);
-
-            setIsPaused(false);
-
-            setElapsedSec(0);
-
-
-            if (
-              shouldExitRef.current
-            ) {
-
-              exit();
-
-              return;
-            }
-
-
-            const nextIndex =
-              decideNextTrackIndex({
-
-                justFinishedIndex:
-                  safeIndex,
-
-                tracksLength:
-                  tracks.length,
-
-                repeatMode:
-                  repeatModeRef.current,
-
-                shuffle:
-                  shuffleRef.current,
-
-              });
-
-
-            // No next song
-
-            if (
-              nextIndex == null
-            ) {
-
-              setCurrentIndex(null);
-
-              setStatusMessage(
-                "Playback finished."
-              );
-
-              pushActivity(
-                "Reached end of queue."
-              );
-
-              return;
-            }
-
-
-            // Play next song
-
-            playTrack(
-              nextIndex
-            );
-          }
-        );
-
-
-      } catch (error) {
-
-        if (
-          audioRef.current ===
-          null
-        ) {
-          return;
-        }
-
 
         setIsPlaying(false);
-
         setIsPaused(false);
-
-        setCurrentIndex(null);
-
-
+        setIsBuffering(false);
+        setElapsedSec(0);
+        setDurationSec(null);
+        setCurrentTrack(null);
+        setInputFocused(false);
         setStatusMessage(
-          `Playback error: ${
-            error?.message ??
-            "Unable to load audio."
-          }`
+            results.length > 0
+                ? 'Playback stopped. Use ↑/↓ to pick another track, Esc to search.'
+                : 'Playback stopped.',
         );
+        pushActivity('Playback stopped.');
+    }, [clearProgressTimer, pushActivity, results.length]);
 
+    const playTrack = useCallback(
+        async (track) => {
+            if (!track || (track.source !== 'youtube' && !track.streamUrl)) {
+                setStatusMessage('This track cannot be played.');
+                return;
+            }
 
-        pushActivity(
-          "Playback error."
-        );
-      }
-    },
+            const playToken = ++playTokenRef.current;
+            manualStopRef.current = false;
 
-    [
-      exit,
-      pushActivity,
-      tracks,
-    ]
-  );
+            clearProgressTimer();
 
+            if (ffplayRef.current) {
+                try {
+                    ffplayRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
 
-  // =================================================
-  // PAUSE / RESUME
-  // =================================================
+                ffplayRef.current = null;
+            }
 
-  const togglePause = useCallback(
-    () => {
+            if (audioRef.current) {
+                try {
+                    audioRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
 
-      const player =
-        audioRef.current;
+                try {
+                    audioRef.current.dispose();
+                } catch {
+                    // Ignore dispose errors.
+                }
 
+                audioRef.current = null;
+            }
 
-      if (!player) {
-        return;
-      }
+            setCurrentTrack(track);
+            setIsPlaying(false);
+            setIsPaused(false);
+            setIsBuffering(true);
+            setElapsedSec(0);
+            setDurationSec(track.durationSec);
+            setStatusMessage(`Buffering: ${track.title}`);
+            pushActivity(`Loading stream: ${track.title}`);
 
+            try {
+                if (track.source === 'youtube') {
+                    if (!track.videoId) {
+                        throw new Error('Missing YouTube video id.');
+                    }
 
-      if (isPaused) {
+                    const { url, durationSec: resolvedDuration } = await getYouTubeAudioUrl(track.videoId);
+                    const finalDuration = resolvedDuration ?? track.durationSec ?? null;
 
-        player.play();
+                    if (playToken !== playTokenRef.current) {
+                        return;
+                    }
 
-        setIsPlaying(true);
+                    setDurationSec(finalDuration);
+                    setIsBuffering(false);
 
-        setIsPaused(false);
+                    const handle = playFfplay(url, {
+                        onEnd: () => {
+                            if (playToken !== playTokenRef.current || manualStopRef.current) {
+                                return;
+                            }
 
+                            clearProgressTimer();
+                            ffplayRef.current = null;
+                            setIsPlaying(false);
+                            setIsPaused(false);
+                            setElapsedSec(0);
+                            setInputFocused(false);
+                            setStatusMessage(
+                                results.length > 0
+                                    ? 'Playback finished. Use ↑/↓ to pick another, Esc to search.'
+                                    : 'Playback finished.',
+                            );
+                            pushActivity('Track finished.');
+                        },
+                        onError: (error) => {
+                            if (playToken !== playTokenRef.current || manualStopRef.current) {
+                                return;
+                            }
 
-        setStatusMessage(
-          "Resumed playback."
-        );
+                            clearProgressTimer();
+                            ffplayRef.current = null;
+                            setIsPlaying(false);
+                            setIsPaused(false);
+                            setIsBuffering(false);
+                            setCurrentTrack(null);
+                            setInputFocused(false);
+                            setStatusMessage(`Playback error: ${error?.message ?? 'Unable to stream this track.'}`);
+                            pushActivity('Playback failed.');
+                        },
+                    });
 
-        pushActivity(
-          "Playback resumed."
-        );
+                    ffplayRef.current = handle;
+                    setIsPlaying(true);
+                    setIsPaused(false);
+                    setInputFocused(false);
+                    startProgressTimer(finalDuration);
+                    setStatusMessage(`Streaming: ${track.title}`);
+                    pushActivity(`Now playing: ${track.title}`);
+                    return;
+                }
 
-      } else {
+                if (!track.streamUrl) {
+                    throw new Error('This track does not have a playable stream URL.');
+                }
+
+                const player = audio(track.streamUrl);
+                audioRef.current = player;
+
+                await player;
+
+                if (playToken !== playTokenRef.current || audioRef.current !== player) {
+                    return;
+                }
+
+                setDurationSec(player.duration ?? track.durationSec ?? null);
+                setIsBuffering(false);
+                player.play();
+
+                setIsPlaying(true);
+                setIsPaused(false);
+                setInputFocused(false);
+                setStatusMessage(`Streaming: ${track.title}`);
+                pushActivity(`Now playing: ${track.title}`);
+
+                player.on('timeupdate', (currentTime) => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setElapsedSec(Number(currentTime) || 0);
+                });
+
+                player.on('play', () => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setIsPlaying(true);
+                    setIsPaused(false);
+                    setIsBuffering(false);
+                });
+
+                player.on('pause', () => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setIsPaused(true);
+                });
+
+                player.on('ended', () => {
+                    if (audioRef.current !== player || manualStopRef.current) {
+                        return;
+                    }
+
+                    setIsPlaying(false);
+                    setIsPaused(false);
+                    setElapsedSec(0);
+                    setInputFocused(false);
+                    setStatusMessage(
+                        results.length > 0
+                            ? 'Playback finished. Use ↑/↓ to pick another, Esc to search.'
+                            : 'Playback finished.',
+                    );
+                    pushActivity('Track finished.');
+                });
+            } catch (error) {
+                if (playToken !== playTokenRef.current) {
+                    return;
+                }
+
+                setIsPlaying(false);
+                setIsPaused(false);
+                setIsBuffering(false);
+                setCurrentTrack(null);
+                setInputFocused(false);
+                setStatusMessage(`Playback error: ${error?.message ?? 'Unable to stream this track.'}`);
+                pushActivity('Playback failed.');
+            }
+        },
+        [clearProgressTimer, pushActivity, results.length, startProgressTimer],
+    );
+
+    const runSearch = useCallback(
+        async (searchQuery) => {
+            const trimmed = searchQuery.trim();
+            if (!trimmed) {
+                setStatusMessage('Type a song name before searching.');
+                return;
+            }
+
+            searchAbortRef.current?.abort();
+            const controller = new AbortController();
+            searchAbortRef.current = controller;
+
+            setIsSearching(true);
+            setSearchError(null);
+            setStatusMessage(`Searching for "${trimmed}"...`);
+            pushActivity(`Searching: ${trimmed}`);
+
+            try {
+                const tracks = await searchTracks(trimmed, {
+                    limit: 10,
+                    signal: controller.signal,
+                });
+
+                if (controller.signal.aborted) {
+                    return;
+                }
+
+                setResults(tracks);
+                setSelectedIndex(0);
+                setLastSearchQuery(trimmed);
+                setInputFocused(tracks.length === 0);
+
+                if (tracks.length === 0) {
+                    setStatusMessage(`No streams found for "${trimmed}". Try another spelling or artist name.`);
+                    pushActivity('No results found.');
+                    return;
+                }
+
+                setStatusMessage(
+                    `Found ${tracks.length} result${tracks.length === 1 ? '' : 's'}. ` +
+                        'Use ↑/↓ to pick, Enter to play, Esc to search again.',
+                );
+                pushActivity(`Found ${tracks.length} result${tracks.length === 1 ? '' : 's'}.`);
+            } catch (error) {
+                if (controller.signal.aborted) {
+                    return;
+                }
+
+                const message = error?.message ?? 'Search failed.';
+                setSearchError(message);
+                setResults([]);
+                setStatusMessage(`Search error: ${message}`);
+                pushActivity('Search failed.');
+            } finally {
+                if (!controller.signal.aborted) {
+                    setIsSearching(false);
+                }
+            }
+        },
+        [pushActivity],
+    );
+
+    const togglePause = useCallback(() => {
+        if (ffplayRef.current) {
+            setStatusMessage('Pause is not available for YouTube streams. Press x to stop.');
+            pushActivity('YouTube streams cannot be paused in the terminal player.');
+            return;
+        }
+
+        const player = audioRef.current;
+        if (!player || isBuffering) {
+            return;
+        }
+
+        if (isPaused) {
+            player.play();
+            setIsPlaying(true);
+            setIsPaused(false);
+            setStatusMessage('Resumed playback.');
+            pushActivity('Playback resumed.');
+            return;
+        }
 
         player.pause();
-
         setIsPaused(true);
+        setStatusMessage('Paused playback.');
+        pushActivity('Playback paused.');
+    }, [isBuffering, isPaused, pushActivity]);
 
-
-        setStatusMessage(
-          "Paused playback."
-        );
-
-        pushActivity(
-          "Playback paused."
-        );
-      }
-
-    },
-
-    [
-      isPaused,
-      pushActivity,
-    ]
-  );
-
-
-  // =================================================
-  // STOP
-  // =================================================
-
-  const stopPlayback =
-    useCallback(() => {
-
-      manualStopRef.current =
-        true;
-
-
-      if (audioRef.current) {
-
-        try {
-          audioRef.current.stop();
-        } catch {
-          // Ignore errors
+    useEffect(() => {
+        if ((!isPlaying && !isBuffering) || isPaused) {
+            return;
         }
 
-
-        try {
-          audioRef.current.dispose();
-        } catch {
-          // Ignore errors
-        }
-
-
-        audioRef.current =
-          null;
-      }
-
-
-      setCurrentIndex(null);
-
-      setIsPlaying(false);
-
-      setIsPaused(false);
-
-      setElapsedSec(0);
-
-
-      setStatusMessage(
-        "Stopped playback."
-      );
-
-      pushActivity(
-        "Playback stopped."
-      );
-
-    }, [pushActivity]);
-
-
-  // =================================================
-  // NEXT TRACK
-  // =================================================
-
-  const nextTrack = useCallback(
-    () => {
-
-      if (tracks.length === 0) {
-        return;
-      }
-
-
-      const base =
-        currentIndexRef.current ??
-        selectedIndex;
-
-
-      const target =
-        shuffleRef.current
-
-          ? randomIndex(
-              tracks.length,
-              base
-            )
-
-          : decideNextTrackIndex({
-
-              justFinishedIndex:
-                base,
-
-              tracksLength:
-                tracks.length,
-
-              repeatMode:
-                "all",
-
-              shuffle:
-                false,
-
-            }) ?? 0;
-
-
-      playTrack(
-        target
-      );
-
-    },
-
-    [
-      playTrack,
-      selectedIndex,
-      tracks.length,
-    ]
-  );
-
-
-  // =================================================
-  // PREVIOUS TRACK
-  // =================================================
-
-  const previousTrack =
-    useCallback(() => {
-
-      if (tracks.length === 0) {
-        return;
-      }
-
-
-      const base =
-        currentIndexRef.current ??
-        selectedIndex;
-
-
-      const target =
-        shuffleRef.current
-
-          ? randomIndex(
-              tracks.length,
-              base
-            )
-
-          : wrapIndex(
-              base - 1,
-              tracks.length
-            );
-
-
-      playTrack(
-        target
-      );
-
-    },
-
-    [
-      playTrack,
-      selectedIndex,
-      tracks.length,
-    ]
-  );
-
-
-  // =================================================
-  // SPINNER
-  // =================================================
-
-  useEffect(() => {
-
-    if (
-      !isPlaying ||
-      isPaused
-    ) {
-      return;
-    }
-
-
-    const spinnerTimer =
-      setInterval(() => {
-
-        setSpinnerIndex(
-          (previous) =>
-            (
-              previous + 1
-            ) %
-            SPINNER_FRAMES.length
-        );
-
-      }, 180);
-
-
-    return () => {
-      clearInterval(
-        spinnerTimer
-      );
-    };
-
-  }, [
-    isPlaying,
-    isPaused,
-  ]);
-
-
-  // =================================================
-  // CLEANUP
-  // =================================================
-
-  useEffect(() => {
-
-    return () => {
-
-      shouldExitRef.current =
-        true;
-
-      manualStopRef.current =
-        true;
-
-
-      if (audioRef.current) {
-
-        try {
-          audioRef.current.stop();
-        } catch {
-          // Ignore errors
-        }
-
-
-        try {
-          audioRef.current.dispose();
-        } catch {
-          // Ignore errors
-        }
-
-
-        audioRef.current =
-          null;
-      }
-    };
-
-  }, []);
-
-
-  // =================================================
-  // KEYBOARD INPUT
-  // =================================================
-
-  useInput(
-    (input, key) => {
-
-
-      // UP
-
-      if (
-        key.upArrow ||
-        input === "k"
-      ) {
-
-        setSelectedIndex(
-          (previous) =>
-            wrapIndex(
-              previous - 1,
-              tracks.length
-            )
-        );
-
-        return;
-      }
-
-
-      // DOWN
-
-      if (
-        key.downArrow ||
-        input === "j"
-      ) {
-
-        setSelectedIndex(
-          (previous) =>
-            wrapIndex(
-              previous + 1,
-              tracks.length
-            )
-        );
-
-        return;
-      }
-
-
-      // PREVIOUS
-
-      if (
-        key.leftArrow
-      ) {
-
-        previousTrack();
-
-        return;
-      }
-
-
-      // NEXT
-
-      if (
-        key.rightArrow
-      ) {
-
-        nextTrack();
-
-        return;
-      }
-
-
-      // PLAY
-
-      if (
-        key.return
-      ) {
-
-        playTrack(
-          selectedIndex
-        );
-
-        return;
-      }
-
-
-      // PAUSE / RESUME
-
-      if (
-        input === " "
-      ) {
-
-        togglePause();
-
-        return;
-      }
-
-
-      // NEXT
-
-      if (
-        input === "n"
-      ) {
-
-        nextTrack();
-
-        return;
-      }
-
-
-      // PREVIOUS
-
-      if (
-        input === "b"
-      ) {
-
-        previousTrack();
-
-        return;
-      }
-
-
-      // SHUFFLE
-
-      if (
-        input === "s"
-      ) {
-
-        setShuffle(
-          (previous) => {
-
-            const next =
-              !previous;
-
-
-            setStatusMessage(
-              `Shuffle ${
-                next
-                  ? "enabled"
-                  : "disabled"
-              }.`
-            );
-
-
-            pushActivity(
-              `Shuffle ${
-                next
-                  ? "ON"
-                  : "OFF"
-              }.`
-            );
-
-
-            return next;
-          }
-        );
-
-        return;
-      }
-
-
-      // REPEAT
-
-      if (
-        input === "t"
-      ) {
-
-        setRepeatMode(
-          (previous) => {
-
-
-            if (
-              previous === "off"
-            ) {
-
-              setStatusMessage(
-                "Repeat mode: all tracks."
-              );
-
-              pushActivity(
-                "Repeat: ALL."
-              );
-
-              return "all";
+        const timer = setInterval(() => {
+            setSpinnerIndex((previous) => (previous + 1) % SPINNER_FRAMES.length);
+        }, 180);
+
+        return () => clearInterval(timer);
+    }, [isBuffering, isPaused, isPlaying]);
+
+    useEffect(
+        () => () => {
+            shouldExitRef.current = true;
+            manualStopRef.current = true;
+            searchAbortRef.current?.abort();
+            clearProgressTimer();
+
+            if (ffplayRef.current) {
+                try {
+                    ffplayRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
+
+                ffplayRef.current = null;
             }
 
+            if (audioRef.current) {
+                try {
+                    audioRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
 
-            if (
-              previous === "all"
-            ) {
+                try {
+                    audioRef.current.dispose();
+                } catch {
+                    // Ignore dispose errors.
+                }
 
-              setStatusMessage(
-                "Repeat mode: current track."
-              );
+                audioRef.current = null;
+            }
+        },
+        [clearProgressTimer],
+    );
 
-              pushActivity(
-                "Repeat: ONE."
-              );
+    useInput((input, key) => {
+        if (key.escape) {
+            setInputFocused(true);
+            setStatusMessage('Search bar active — type a new song and press Enter.');
+            return;
+        }
 
-              return "one";
+        if (inputFocused) {
+            if (key.return) {
+                runSearch(query);
+                return;
             }
 
-
-            setStatusMessage(
-              "Repeat mode: off."
-            );
-
-            pushActivity(
-              "Repeat: OFF."
-            );
-
-            return "off";
-
-          }
-        );
-
-        return;
-      }
-
-
-      // THEME
-
-      if (
-        input === "c"
-      ) {
-
-        setThemeIndex(
-          (previous) => {
-
-            const next =
-              (
-                previous + 1
-              ) %
-              THEMES.length;
-
-
-            setStatusMessage(
-              `Theme switched to ${
-                THEMES[next].name
-              }.`
-            );
-
-
-            pushActivity(
-              `Theme: ${
-                THEMES[next].name
-              }`
-            );
-
-
-            return next;
-          }
-        );
-
-        return;
-      }
-
-
-      // FIRST TRACK
-
-      if (
-        input === "g"
-      ) {
-
-        setSelectedIndex(0);
-
-        return;
-      }
-
-
-      // LAST TRACK
-
-      if (
-        input === "G"
-      ) {
-
-        setSelectedIndex(
-          Math.max(
-            0,
-            tracks.length - 1
-          )
-        );
-
-        return;
-      }
-
-
-      // HELP
-
-      if (
-        input === "?"
-      ) {
-
-        setShowHelp(
-          (previous) =>
-            !previous
-        );
-
-        pushActivity(
-          "Toggled help panel."
-        );
-
-        return;
-      }
-
-
-      // STOP
-
-      if (
-        input === "x"
-      ) {
-
-        stopPlayback();
-
-        return;
-      }
-
-
-      // QUIT
-
-      if (
-        input === "q" ||
-        (
-          key.ctrl &&
-          input === "c"
-        )
-      ) {
-
-        shouldExitRef.current =
-          true;
-
-        stopPlayback();
-
-        exit();
-
-      }
-
-    }
-  );
-
-
-  // =================================================
-  // UI VALUES
-  // =================================================
-
-  const currentTrack =
-    currentIndex != null
-      ? tracks[currentIndex]
-      : null;
-
-
-  const selectedTrack =
-    tracks[selectedIndex] ??
-    null;
-
-
-  const displayTrack =
-    currentTrack ??
-    selectedTrack;
-
-
-  const visibleTracks =
-    getVisibleTracks(
-      tracks,
-      selectedIndex,
-      currentIndex,
-      MENU_VIEW_SIZE
-    );
-
-
-  const currentTrackDuration =
-    currentTrack
-
-      ? (
-          trackDurations[
-            currentTrack.id
-          ] ??
-
-          currentTrack.durationSec ??
-
-          null
-        )
-
-      : null;
-
-
-  const displayTrackDuration =
-    displayTrack
-
-      ? (
-          trackDurations[
-            displayTrack.id
-          ] ??
-
-          displayTrack.durationSec ??
-
-          null
-        )
-
-      : null;
-
-
-  const cappedElapsed =
-    useMemo(() => {
-
-      if (
-        !currentTrackDuration
-      ) {
-        return elapsedSec;
-      }
-
-
-      return clamp(
-        elapsedSec,
-        0,
-        currentTrackDuration
-      );
-
-    }, [
-      currentTrackDuration,
-      elapsedSec,
-    ]);
-
-
-  const progressBar =
-    makeProgressBar(
-      cappedElapsed,
-      displayTrackDuration,
-      PROGRESS_WIDTH
-    );
-
-
-  const elapsedLabel =
-    formatTime(
-      cappedElapsed
-    );
-
-
-  const durationLabel =
-    formatDuration(
-      displayTrackDuration
-    );
-
-
-  const trackCountLabel =
-    `${selectedIndex + 1}/${tracks.length}`;
-
-
-  const stateLabel =
-    playbackLabel(
-      isPlaying,
-      isPaused
-    );
-
-
-  const repeatModeLabel =
-    repeatLabel(
-      repeatMode
-    );
-
-
-  const stateColor =
-    !isPlaying
-      ? "red"
-      : isPaused
-        ? "yellow"
-        : "green";
-
-
-  const spinner =
-    isPlaying &&
-    !isPaused
-
-      ? SPINNER_FRAMES[
-          spinnerIndex
-        ]
-
-      : " ";
-
-
-  const theme =
-    THEMES[
-      themeIndex
-    ];
-
-
-  const accentColor =
-    ACCENT_COLORS[
-      spinnerIndex %
-      ACCENT_COLORS.length
-    ];
-
-
-  // =================================================
-  // UI
-  // =================================================
-
-  return h(
-
-    Box,
-
-    {
-      flexDirection:
-        "column",
-
-      paddingX: 1,
-
-      paddingY: 1,
-    },
-
-
-    // ===============================================
-    // HEADER
-    // ===============================================
-
-    h(
-
-      Box,
-
-      {
-        borderStyle:
-          "round",
-
-        borderColor:
-          theme.headerBorder,
-
-        paddingX: 1,
-
-        flexDirection:
-          "column",
-      },
-
-
-      ...TITLE_BLOCK.map(
-        (line, idx) =>
-
-          h(
-
-            Text,
-
-            {
-              key:
-                `title-${idx}`,
-
-              bold: true,
-
-              color:
-                idx % 2 === 0
-                  ? theme.title
-                  : accentColor,
-            },
-
-            line
-          )
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color: "gray",
-        },
-
-        "Terminal music player"
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color:
-            stateColor,
-        },
-
-        `${spinner} State ${stateLabel}`
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color: "gray",
-        },
-
-        `Theme ${theme.name} | ` +
-        `Shuffle ${
-          shuffle
-            ? "ON"
-            : "OFF"
-        } | ` +
-        `Repeat ${repeatModeLabel}`
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color: "white",
-        },
-
-        `Now Playing: ${
-          currentTrack
-            ? currentTrack.title
-            : "None"
-        }`
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color: "blue",
-        },
-
-        `Selected: ${
-          selectedTrack
-            ? selectedTrack.title
-            : "None"
-        } (${trackCountLabel})`
-      ),
-
-
-      h(
-        Text,
-
-        {
-          color: "green",
-        },
-
-        `${progressBar} ` +
-        `${elapsedLabel} / ` +
-        `${durationLabel}`
-      )
-    ),
-
-
-    h(
-      Text,
-      null,
-      ""
-    ),
-
-
-    // ===============================================
-    // MUSIC MENU
-    // ===============================================
-
-    h(
-
-      Box,
-
-      {
-        borderStyle:
-          "round",
-
-        borderColor:
-          theme.menuBorder,
-
-        paddingX: 1,
-
-        flexDirection:
-          "column",
-      },
-
-
-      h(
-
-        Text,
-
-        {
-          bold: true,
-
-          color:
-            theme.menuBorder,
-        },
-
-        `Music Menu (${tracks.length} tracks)`
-      ),
-
-
-      visibleTracks.start > 0
-
-        ? h(
-            Text,
-
-            {
-              color: "gray",
-            },
-
-            "..."
-          )
-
-        : null,
-
-
-      ...visibleTracks.items.map(
-        (track, offset) => {
-
-          const index =
-            visibleTracks.start +
-            offset;
-
-
-          const selected =
-            index ===
-            selectedIndex;
-
-
-          const active =
-            index ===
-            currentIndex;
-
-
-          const pointer =
-            selected
-              ? ">"
-              : " ";
-
-
-          const marker =
-            active
-              ? "P"
-              : " ";
-
-
-          const itemDuration =
-            formatDuration(
-
-              trackDurations[
-                track.id
-              ] ??
-
-              track.durationSec ??
-
-              null
-            );
-
-
-          const line =
-            `${pointer}${marker} ` +
-            `${String(
-              index + 1
-            ).padStart(
-              2,
-              "0"
-            )}. ` +
-            `${track.title} ` +
-            `(${itemDuration})`;
-
-
-          const color =
-            active
-              ? theme.active
-              : selected
-                ? theme.selected
-                : "white";
-
-
-          return h(
-
-            Text,
-
-            {
-              key:
-                track.id,
-
-              color,
-
-              bold:
-                selected ||
-                active,
-            },
-
-            line
-          );
+            if (key.tab && results.length > 0) {
+                setInputFocused(false);
+                setStatusMessage('Results mode — ↑/↓ to pick, Enter to play, Esc to search.');
+                return;
+            }
+
+            if (input === 'q' && query.length === 0) {
+                shouldExitRef.current = true;
+                stopPlayback();
+                exit();
+            }
+
+            return;
         }
-      ),
 
+        if (key.upArrow || input === 'k') {
+            if (results.length > 0) {
+                setSelectedIndex((previous) => wrapIndex(previous - 1, results.length));
+            }
 
-      visibleTracks.end <
-      tracks.length
-
-        ? h(
-            Text,
-
-            {
-              color: "gray",
-            },
-
-            "..."
-          )
-
-        : null
-    ),
-
-
-    h(
-      Text,
-      null,
-      ""
-    ),
-
-
-    // ===============================================
-    // STATUS
-    // ===============================================
-
-    h(
-
-      Box,
-
-      {
-        borderStyle:
-          "round",
-
-        borderColor:
-          theme.statusBorder,
-
-        paddingX: 1,
-
-        flexDirection:
-          "column",
-      },
-
-
-      h(
-
-        Text,
-
-        {
-          color:
-            "yellow",
-        },
-
-        statusMessage
-      ),
-
-
-      h(
-
-        Text,
-
-        {
-          color:
-            theme.keyHint,
-        },
-
-        "Keys: Arrows or j/k navigate | " +
-        "Enter play | " +
-        "Space pause/resume | " +
-        "n/b next/back | " +
-        "g/G top/bottom | " +
-        "c theme | " +
-        "s shuffle | " +
-        "t repeat | " +
-        "x stop | " +
-        "? help | " +
-        "q quit"
-      )
-    ),
-
-
-    h(
-      Text,
-      null,
-      ""
-    ),
-
-
-    // ===============================================
-    // ACTIVITY
-    // ===============================================
-
-    h(
-
-      Box,
-
-      {
-        borderStyle:
-          "round",
-
-        borderColor:
-          "green",
-
-        paddingX: 1,
-
-        flexDirection:
-          "column",
-      },
-
-
-      h(
-
-        Text,
-
-        {
-          bold: true,
-
-          color:
-            "green",
-        },
-
-        "Live Activity"
-      ),
-
-
-      ...activityFeed.map(
-        (entry, idx) =>
-
-          h(
-
-            Text,
-
-            {
-              key:
-                `${idx}-${entry}`,
-
-              color:
-                idx === 0
-                  ? "white"
-                  : "gray",
-            },
-
-            `${
-              idx === 0
-                ? ">"
-                : "-"
-            } ${entry}`
-          )
-      )
-    ),
-
-
-    // ===============================================
-    // HELP
-    // ===============================================
-
-    showHelp
-
-      ? h(
-
-          Box,
-
-          {
-            marginTop: 1,
-
-            borderStyle:
-              "round",
-
-            borderColor:
-              theme.helpBorder,
-
-            paddingX: 1,
-
-            flexDirection:
-              "column",
-          },
-
-
-          h(
-
-            Text,
-
-            {
-              bold: true,
-
-              color:
-                theme.helpBorder,
-            },
-
-            "Help"
-          ),
-
-
-          h(
-            Text,
-
-            {
-              color: "white",
-            },
-
-            "Use Up/Down or j/k to move through songs."
-          ),
-
-
-          h(
-            Text,
-
-            {
-              color: "white",
-            },
-
-            "Press Enter to play the selected song."
-          ),
-
-
-          h(
-            Text,
-
-            {
-              color: "white",
-            },
-
-            "Use Left/Right or b/n for previous/next playback."
-          ),
-
-
-          h(
-            Text,
-
-            {
-              color: "white",
-            },
-
-            "Press Space to pause or resume."
-          ),
-
-
-          h(
-            Text,
-
-            {
-              color: "white",
-            },
-
-            "Press ? again to close this help box."
-          )
-        )
-
-      : null
-  );
-};
-
-
-// ==================================================
-// BOOTSTRAP
-// ==================================================
-
-const Bootstrap = () => {
-
-  const [
-    state,
-    setState,
-  ] = useState({
-
-    loading: true,
-
-    tracks: [],
-
-    error: null,
-
-  });
-
-
-  useEffect(() => {
-
-    let mounted = true;
-
-
-    loadTracks()
-
-      .then(
-        (tracks) => {
-
-          if (mounted) {
-
-            setState({
-
-              loading:
-                false,
-
-              tracks,
-
-              error:
-                null,
-
-            });
-          }
+            return;
         }
-      )
 
-      .catch(
-        (error) => {
+        if (key.downArrow || input === 'j') {
+            if (results.length > 0) {
+                setSelectedIndex((previous) => wrapIndex(previous + 1, results.length));
+            }
 
-          if (mounted) {
-
-            setState({
-
-              loading:
-                false,
-
-              tracks:
-                [],
-
-              error:
-                error.message,
-
-            });
-          }
+            return;
         }
-      );
 
+        if (/^[1-9]$/.test(input) && results.length > 0) {
+            const index = Number(input) - 1;
+            if (index < results.length) {
+                setSelectedIndex(index);
+                playTrack(results[index]);
+            }
 
-    return () => {
+            return;
+        }
 
-      mounted = false;
+        if (
+            input &&
+            input.length === 1 &&
+            !key.ctrl &&
+            !key.meta &&
+            input >= ' ' &&
+            input !== '\t'
+        ) {
+            setInputFocused(true);
+            setQuery(input);
+            setStatusMessage('Search bar active — keep typing and press Enter.');
+            return;
+        }
 
-    };
+        if (key.tab || input === '/') {
+            setInputFocused(true);
+            setStatusMessage('Search bar active — type a new song and press Enter.');
+            return;
+        }
 
-  }, []);
+        if (key.return) {
+            const track = results[selectedIndex];
+            if (track) {
+                playTrack(track);
+            }
 
+            return;
+        }
 
-  // -----------------------------------------------
-  // LOADING
-  // -----------------------------------------------
+        if (input === ' ') {
+            togglePause();
+            return;
+        }
 
-  if (
-    state.loading
-  ) {
+        if (input === 'x') {
+            stopPlayback();
+            return;
+        }
+
+        if (input === 'r' && results.length > 0) {
+            playTrack(results[selectedIndex]);
+            return;
+        }
+
+        if (input === 'q' || (key.ctrl && input === 'c')) {
+            shouldExitRef.current = true;
+            stopPlayback();
+            exit();
+        }
+    });
+
+    const visibleResults = useMemo(() => {
+        if (results.length <= RESULTS_VIEW_SIZE) {
+            return {
+                items: results,
+                start: 0,
+                end: results.length,
+            };
+        }
+
+        let start = selectedIndex - Math.floor(RESULTS_VIEW_SIZE / 2);
+        start = clamp(start, 0, results.length - RESULTS_VIEW_SIZE);
+        const end = start + RESULTS_VIEW_SIZE;
+
+        return {
+            items: results.slice(start, end),
+            start,
+            end,
+        };
+    }, [results, selectedIndex]);
+
+    const cappedElapsed = useMemo(() => {
+        if (!durationSec) {
+            return elapsedSec;
+        }
+
+        return clamp(elapsedSec, 0, durationSec);
+    }, [durationSec, elapsedSec]);
+
+    const progressBar = makeProgressBar(cappedElapsed, durationSec, PROGRESS_WIDTH);
+    const stateLabel = isBuffering ? 'BUFFERING' : playbackLabel(isPlaying, isPaused);
+    const stateColor = isBuffering ? 'yellow' : !isPlaying ? 'gray' : isPaused ? 'yellow' : 'green';
+    const spinner = isPlaying && !isPaused ? SPINNER_FRAMES[spinnerIndex] : isBuffering ? SPINNER_FRAMES[spinnerIndex] : ' ';
+    const footerLeft = isSearching
+        ? 'searching…'
+        : inputFocused
+          ? 'mode: search (Enter) · Esc'
+          : 'mode: results (↑/↓ Enter) · Esc search';
+    const footerRight = currentTrack
+        ? `${formatTime(cappedElapsed)} / ${formatDuration(durationSec)}`
+        : 'no track loaded';
 
     return h(
+        Box,
+        { flexDirection: 'column', paddingX: 1, paddingY: 1 },
 
-      Box,
+        h(
+            Box,
+            { flexDirection: 'column', marginBottom: 1 },
+            HEADER_LINES.map((line, lineIndex) => {
+                if (!line) {
+                    return h(Text, { key: `gap-${lineIndex}` }, '');
+                }
 
-      {
-        paddingX: 1,
-      },
+                if (line.startsWith('> ')) {
+                    const text = line.slice(2);
+                    return h(
+                        Box,
+                        { key: `line-${lineIndex}` },
+                        h(Text, { color: 'cyan', bold: true }, '> '),
+                        ...text.split('').map((char, charIndex) =>
+                            h(
+                                Text,
+                                {
+                                    key: `${lineIndex}-${charIndex}`,
+                                    color: gradientColor(charIndex, text.length),
+                                    bold: true,
+                                },
+                                char,
+                            ),
+                        ),
+                    );
+                }
 
+                return h(
+                    Text,
+                    { key: `line-${lineIndex}`, color: 'magenta' },
+                    line,
+                );
+            }),
+        ),
 
-      h(
+        h(Text, { color: 'gray', bold: true }, 'Tips for getting started:'),
+        TIPS.map((tip, index) =>
+            h(
+                Text,
+                { key: `tip-${index}`, color: 'gray' },
+                `${index + 1}. ${tip}`,
+            ),
+        ),
 
-        Text,
+        h(Text, null, ''),
 
-        {
-          color:
-            "cyan",
-        },
+        h(
+            Box,
+            { flexDirection: 'column', marginBottom: 1 },
+            h(Text, { bold: true, color: 'white' }, 'Search results'),
+            isSearching
+                ? h(Text, { color: 'yellow' }, `${spinner} Searching online catalogs...`)
+                : null,
+            searchError ? h(Text, { color: 'red' }, searchError) : null,
+            !isSearching && results.length === 0
+                ? h(Text, { color: 'gray' }, lastSearchQuery ? `No results for "${lastSearchQuery}".` : 'No results yet.')
+                : null,
+            visibleResults.start > 0 ? h(Text, { color: 'gray' }, '...') : null,
+            ...visibleResults.items.map((track, offset) => {
+                const index = visibleResults.start + offset;
+                const selected = index === selectedIndex;
+                const active = currentTrack?.id === track.id;
+                const prefix = selected ? '>' : ' ';
+                const marker = active ? '♪' : ' ';
+                const line =
+                    `${prefix}${marker} ${String(index + 1).padStart(2, '0')}. ` +
+                    `${track.title} — ${track.artist} ` +
+                    `(${formatDuration(track.durationSec)}) [${sourceLabel(track.source)}]`;
 
-        `Scanning songs in ${SONGS_DIR} ...`
-      )
+                return h(
+                    Text,
+                    {
+                        key: track.id,
+                        color: active ? 'green' : selected ? 'cyan' : 'white',
+                        bold: selected || active,
+                    },
+                    line,
+                );
+            }),
+            visibleResults.end < results.length ? h(Text, { color: 'gray' }, '...') : null,
+        ),
+
+        currentTrack
+            ? h(
+                  Box,
+                  { flexDirection: 'column', marginBottom: 1 },
+                  h(Text, { color: stateColor, bold: true }, `${spinner} ${stateLabel}`),
+                  h(Text, { color: 'white' }, `Now playing: ${currentTrack.title}`),
+                  h(Text, { color: 'gray' }, `Artist: ${currentTrack.artist} · Source: ${sourceLabel(currentTrack.source)}`),
+                  h(Text, { color: 'green' }, `${progressBar} ${formatTime(cappedElapsed)} / ${formatDuration(durationSec)}`),
+              )
+            : null,
+
+        h(Text, { color: 'yellow' }, statusMessage),
+
+        h(Text, null, ''),
+
+        h(
+            Box,
+            {
+                borderStyle: 'round',
+                borderColor: inputFocused ? 'cyan' : 'gray',
+                paddingX: 1,
+                marginBottom: 1,
+            },
+            h(
+                Box,
+                { flexDirection: 'row' },
+                h(Text, { color: 'cyan' }, '> '),
+                h(TextInput, {
+                    value: query,
+                    onChange: setQuery,
+                    placeholder: 'Type a song name (e.g. Shape of You Ed Sheeran)',
+                    focus: inputFocused,
+                    showCursor: inputFocused,
+                }),
+            ),
+        ),
+
+        h(
+            Box,
+            { justifyContent: 'space-between' },
+            h(Text, { color: 'gray' }, `- ${footerLeft}`),
+            h(Text, { color: 'cyan' }, footerRight),
+        ),
+
+        h(Text, null, ''),
+
+        h(
+            Box,
+            { flexDirection: 'column' },
+            h(Text, { color: 'gray', bold: true }, 'Activity'),
+            ...activityFeed.map((entry, index) =>
+                h(
+                    Text,
+                    {
+                        key: `${index}-${entry}`,
+                        color: index === 0 ? 'white' : 'gray',
+                    },
+                    `${index === 0 ? '>' : '-'} ${entry}`,
+                ),
+            ),
+        ),
     );
-  }
-
-
-  // -----------------------------------------------
-  // ERROR
-  // -----------------------------------------------
-
-  if (
-    state.error
-  ) {
-
-    return h(
-
-      Box,
-
-      {
-        flexDirection:
-          "column",
-
-        paddingX: 1,
-      },
-
-
-      h(
-
-        Text,
-
-        {
-          color:
-            "red",
-
-          bold:
-            true,
-        },
-
-        "Unable to start player"
-      ),
-
-
-      h(
-        Text,
-        null,
-        state.error
-      )
-    );
-  }
-
-
-  return h(
-    App,
-    {
-      tracks:
-        state.tracks,
-    }
-  );
 };
 
-
-// ==================================================
-// START APPLICATION
-// ==================================================
-
-render(
-  h(Bootstrap)
-);
+render(h(App));
