@@ -1,0 +1,616 @@
+#!/usr/bin/env node
+
+import React, {
+    useCallback,
+    useEffect,
+    useMemo,
+    useRef,
+    useState,
+} from 'react';
+
+import {
+    Box,
+    Text,
+    render,
+    useApp,
+    useInput,
+} from 'ink';
+
+import TextInput from 'ink-text-input';
+import audio from 'audio';
+
+import {
+    clamp,
+    formatDuration,
+    formatTime,
+    makeProgressBar,
+    playbackLabel,
+    wrapIndex,
+} from './player-core.js';
+
+import { playFfplay } from './ffplay-player.js';
+import { searchTracks } from './stream-search.js';
+import { getYouTubeAudioUrl } from './youtube-stream.js';
+
+const h = React.createElement;
+
+const PROGRESS_WIDTH = 34;
+const RESULTS_VIEW_SIZE = 7;
+
+const SPINNER_FRAMES = ['|', '/', '-', '\\'];
+
+const HEADER_COLORS = ['cyan', 'blue', 'magenta', 'magenta', 'red', 'red'];
+
+const HEADER_LINES = [
+    '> MUSIC PLAYER',
+    '',
+    '  █▀▄▀█ █ █ █▀▀ █▀█ █▀▀ █▀▀ █▀█ █▀▀ █▀█',
+    '  █ ▀ █ █▄█ ██▄ █▀▀ ██▄ ██▄ █▀▄ ██▄ █▀▄',
+];
+
+const TIPS = [
+    'Type a song name below and press Enter to search the web.',
+    'Use Tab to switch between search and results, then ↑/↓ to pick a track.',
+    'Press Enter on a result to stream it — nothing is saved to disk.',
+    'Space pause/resume · x stop · / focus search · q quit',
+];
+
+const sourceLabel = (source) => {
+    if (source === 'audius') {
+        return 'Audius';
+    }
+
+    if (source === 'archive') {
+        return 'Archive';
+    }
+
+    return source;
+};
+
+const gradientColor = (index, total) =>
+    HEADER_COLORS[Math.min(HEADER_COLORS.length - 1, Math.floor((index / total) * HEADER_COLORS.length))];
+
+const App = () => {
+    const { exit } = useApp();
+
+    const [query, setQuery] = useState('');
+    const [inputFocused, setInputFocused] = useState(true);
+    const [results, setResults] = useState([]);
+    const [selectedIndex, setSelectedIndex] = useState(0);
+    const [isSearching, setIsSearching] = useState(false);
+    const [searchError, setSearchError] = useState(null);
+    const [lastSearchQuery, setLastSearchQuery] = useState('');
+
+    const [currentTrack, setCurrentTrack] = useState(null);
+    const [isPlaying, setIsPlaying] = useState(false);
+    const [isPaused, setIsPaused] = useState(false);
+    const [isBuffering, setIsBuffering] = useState(false);
+    const [elapsedSec, setElapsedSec] = useState(0);
+    const [durationSec, setDurationSec] = useState(null);
+    const [spinnerIndex, setSpinnerIndex] = useState(0);
+    const [statusMessage, setStatusMessage] = useState('Ready — search for a song to start streaming.');
+    const [activityFeed, setActivityFeed] = useState(['Welcome to the terminal music streamer.']);
+
+    const audioRef = useRef(null);
+    const searchAbortRef = useRef(null);
+    const playTokenRef = useRef(0);
+    const manualStopRef = useRef(false);
+    const shouldExitRef = useRef(false);
+
+    const pushActivity = useCallback((message) => {
+        setActivityFeed((previous) => [message, ...previous].slice(0, 4));
+    }, []);
+
+    const stopPlayback = useCallback(() => {
+        manualStopRef.current = true;
+        playTokenRef.current += 1;
+
+        if (audioRef.current) {
+            try {
+                audioRef.current.stop();
+            } catch {
+                // Ignore stop errors.
+            }
+
+            try {
+                audioRef.current.dispose();
+            } catch {
+                // Ignore dispose errors.
+            }
+
+            audioRef.current = null;
+        }
+
+        setIsPlaying(false);
+        setIsPaused(false);
+        setIsBuffering(false);
+        setElapsedSec(0);
+        setDurationSec(null);
+        setCurrentTrack(null);
+        setStatusMessage('Playback stopped.');
+        pushActivity('Playback stopped.');
+    }, [pushActivity]);
+
+    const playTrack = useCallback(
+        async (track) => {
+            if (!track?.streamUrl) {
+                setStatusMessage('This track does not have a playable stream URL.');
+                return;
+            }
+
+            const playToken = ++playTokenRef.current;
+            manualStopRef.current = false;
+
+            if (audioRef.current) {
+                try {
+                    audioRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
+
+                try {
+                    audioRef.current.dispose();
+                } catch {
+                    // Ignore dispose errors.
+                }
+
+                audioRef.current = null;
+            }
+
+            setCurrentTrack(track);
+            setIsPlaying(false);
+            setIsPaused(false);
+            setIsBuffering(true);
+            setElapsedSec(0);
+            setDurationSec(track.durationSec);
+            setStatusMessage(`Buffering: ${track.title}`);
+            pushActivity(`Loading stream: ${track.title}`);
+
+            try {
+                const player = audio(track.streamUrl);
+                audioRef.current = player;
+
+                await player;
+
+                if (playToken !== playTokenRef.current || audioRef.current !== player) {
+                    return;
+                }
+
+                setDurationSec(player.duration ?? track.durationSec ?? null);
+                setIsBuffering(false);
+                player.play();
+
+                setIsPlaying(true);
+                setIsPaused(false);
+                setStatusMessage(`Streaming: ${track.title}`);
+                pushActivity(`Now playing: ${track.title}`);
+
+                player.on('timeupdate', (currentTime) => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setElapsedSec(Number(currentTime) || 0);
+                });
+
+                player.on('play', () => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setIsPlaying(true);
+                    setIsPaused(false);
+                    setIsBuffering(false);
+                });
+
+                player.on('pause', () => {
+                    if (audioRef.current !== player) {
+                        return;
+                    }
+
+                    setIsPaused(true);
+                });
+
+                player.on('ended', () => {
+                    if (audioRef.current !== player || manualStopRef.current) {
+                        return;
+                    }
+
+                    setIsPlaying(false);
+                    setIsPaused(false);
+                    setElapsedSec(0);
+                    setStatusMessage('Playback finished.');
+                    pushActivity('Track finished.');
+                });
+            } catch (error) {
+                if (playToken !== playTokenRef.current) {
+                    return;
+                }
+
+                setIsPlaying(false);
+                setIsPaused(false);
+                setIsBuffering(false);
+                setCurrentTrack(null);
+                setStatusMessage(`Playback error: ${error?.message ?? 'Unable to stream this track.'}`);
+                pushActivity('Playback failed.');
+            }
+        },
+        [pushActivity],
+    );
+
+    const runSearch = useCallback(
+        async (searchQuery) => {
+            const trimmed = searchQuery.trim();
+            if (!trimmed) {
+                setStatusMessage('Type a song name before searching.');
+                return;
+            }
+
+            searchAbortRef.current?.abort();
+            const controller = new AbortController();
+            searchAbortRef.current = controller;
+
+            setIsSearching(true);
+            setSearchError(null);
+            setStatusMessage(`Searching for "${trimmed}"...`);
+            pushActivity(`Searching: ${trimmed}`);
+
+            try {
+                const tracks = await searchTracks(trimmed, {
+                    limit: 10,
+                    signal: controller.signal,
+                });
+
+                if (controller.signal.aborted) {
+                    return;
+                }
+
+                setResults(tracks);
+                setSelectedIndex(0);
+                setLastSearchQuery(trimmed);
+                setInputFocused(false);
+
+                if (tracks.length === 0) {
+                    setStatusMessage(`No streams found for "${trimmed}". Try another spelling or artist name.`);
+                    pushActivity('No results found.');
+                    return;
+                }
+
+                setStatusMessage(`Found ${tracks.length} stream${tracks.length === 1 ? '' : 's'} for "${trimmed}".`);
+                pushActivity(`Found ${tracks.length} result${tracks.length === 1 ? '' : 's'}.`);
+            } catch (error) {
+                if (controller.signal.aborted) {
+                    return;
+                }
+
+                const message = error?.message ?? 'Search failed.';
+                setSearchError(message);
+                setResults([]);
+                setStatusMessage(`Search error: ${message}`);
+                pushActivity('Search failed.');
+            } finally {
+                if (!controller.signal.aborted) {
+                    setIsSearching(false);
+                }
+            }
+        },
+        [pushActivity],
+    );
+
+    const togglePause = useCallback(() => {
+        const player = audioRef.current;
+        if (!player || isBuffering) {
+            return;
+        }
+
+        if (isPaused) {
+            player.play();
+            setIsPlaying(true);
+            setIsPaused(false);
+            setStatusMessage('Resumed playback.');
+            pushActivity('Playback resumed.');
+            return;
+        }
+
+        player.pause();
+        setIsPaused(true);
+        setStatusMessage('Paused playback.');
+        pushActivity('Playback paused.');
+    }, [isBuffering, isPaused, pushActivity]);
+
+    useEffect(() => {
+        if ((!isPlaying && !isBuffering) || isPaused) {
+            return;
+        }
+
+        const timer = setInterval(() => {
+            setSpinnerIndex((previous) => (previous + 1) % SPINNER_FRAMES.length);
+        }, 180);
+
+        return () => clearInterval(timer);
+    }, [isBuffering, isPaused, isPlaying]);
+
+    useEffect(
+        () => () => {
+            shouldExitRef.current = true;
+            manualStopRef.current = true;
+            searchAbortRef.current?.abort();
+
+            if (audioRef.current) {
+                try {
+                    audioRef.current.stop();
+                } catch {
+                    // Ignore stop errors.
+                }
+
+                try {
+                    audioRef.current.dispose();
+                } catch {
+                    // Ignore dispose errors.
+                }
+
+                audioRef.current = null;
+            }
+        },
+        [],
+    );
+
+    useInput((input, key) => {
+        if (inputFocused) {
+            if (key.return) {
+                runSearch(query);
+            }
+
+            if (key.tab) {
+                if (results.length > 0) {
+                    setInputFocused(false);
+                }
+
+                return;
+            }
+
+            if (input === 'q' && query.length === 0) {
+                shouldExitRef.current = true;
+                stopPlayback();
+                exit();
+            }
+
+            return;
+        }
+
+        if (key.tab || input === '/') {
+            setInputFocused(true);
+            return;
+        }
+
+        if (key.upArrow || input === 'k') {
+            setSelectedIndex((previous) => wrapIndex(previous - 1, results.length));
+            return;
+        }
+
+        if (key.downArrow || input === 'j') {
+            setSelectedIndex((previous) => wrapIndex(previous + 1, results.length));
+            return;
+        }
+
+        if (key.return) {
+            const track = results[selectedIndex];
+            if (track) {
+                playTrack(track);
+            }
+
+            return;
+        }
+
+        if (input === ' ') {
+            togglePause();
+            return;
+        }
+
+        if (input === 'x') {
+            stopPlayback();
+            return;
+        }
+
+        if (input === 'r' && results.length > 0) {
+            playTrack(results[selectedIndex]);
+            return;
+        }
+
+        if (input === 'q' || (key.ctrl && input === 'c')) {
+            shouldExitRef.current = true;
+            stopPlayback();
+            exit();
+        }
+    });
+
+    const visibleResults = useMemo(() => {
+        if (results.length <= RESULTS_VIEW_SIZE) {
+            return {
+                items: results,
+                start: 0,
+                end: results.length,
+            };
+        }
+
+        let start = selectedIndex - Math.floor(RESULTS_VIEW_SIZE / 2);
+        start = clamp(start, 0, results.length - RESULTS_VIEW_SIZE);
+        const end = start + RESULTS_VIEW_SIZE;
+
+        return {
+            items: results.slice(start, end),
+            start,
+            end,
+        };
+    }, [results, selectedIndex]);
+
+    const cappedElapsed = useMemo(() => {
+        if (!durationSec) {
+            return elapsedSec;
+        }
+
+        return clamp(elapsedSec, 0, durationSec);
+    }, [durationSec, elapsedSec]);
+
+    const progressBar = makeProgressBar(cappedElapsed, durationSec, PROGRESS_WIDTH);
+    const stateLabel = isBuffering ? 'BUFFERING' : playbackLabel(isPlaying, isPaused);
+    const stateColor = isBuffering ? 'yellow' : !isPlaying ? 'gray' : isPaused ? 'yellow' : 'green';
+    const spinner = isPlaying && !isPaused ? SPINNER_FRAMES[spinnerIndex] : isBuffering ? SPINNER_FRAMES[spinnerIndex] : ' ';
+    const modeLabel = inputFocused ? 'search' : 'results';
+    const footerLeft = isSearching ? 'searching…' : `mode: ${modeLabel}`;
+    const footerRight = currentTrack
+        ? `${formatTime(cappedElapsed)} / ${formatDuration(durationSec)}`
+        : 'no track loaded';
+
+    return h(
+        Box,
+        { flexDirection: 'column', paddingX: 1, paddingY: 1 },
+
+        h(
+            Box,
+            { flexDirection: 'column', marginBottom: 1 },
+            HEADER_LINES.map((line, lineIndex) => {
+                if (!line) {
+                    return h(Text, { key: `gap-${lineIndex}` }, '');
+                }
+
+                if (line.startsWith('> ')) {
+                    const text = line.slice(2);
+                    return h(
+                        Box,
+                        { key: `line-${lineIndex}` },
+                        h(Text, { color: 'cyan', bold: true }, '> '),
+                        ...text.split('').map((char, charIndex) =>
+                            h(
+                                Text,
+                                {
+                                    key: `${lineIndex}-${charIndex}`,
+                                    color: gradientColor(charIndex, text.length),
+                                    bold: true,
+                                },
+                                char,
+                            ),
+                        ),
+                    );
+                }
+
+                return h(
+                    Text,
+                    { key: `line-${lineIndex}`, color: 'magenta' },
+                    line,
+                );
+            }),
+        ),
+
+        h(Text, { color: 'gray', bold: true }, 'Tips for getting started:'),
+        TIPS.map((tip, index) =>
+            h(
+                Text,
+                { key: `tip-${index}`, color: 'gray' },
+                `${index + 1}. ${tip}`,
+            ),
+        ),
+
+        h(Text, null, ''),
+
+        h(
+            Box,
+            { flexDirection: 'column', marginBottom: 1 },
+            h(Text, { bold: true, color: 'white' }, 'Search results'),
+            isSearching
+                ? h(Text, { color: 'yellow' }, `${spinner} Searching online catalogs...`)
+                : null,
+            searchError ? h(Text, { color: 'red' }, searchError) : null,
+            !isSearching && results.length === 0
+                ? h(Text, { color: 'gray' }, lastSearchQuery ? `No results for "${lastSearchQuery}".` : 'No results yet.')
+                : null,
+            visibleResults.start > 0 ? h(Text, { color: 'gray' }, '...') : null,
+            ...visibleResults.items.map((track, offset) => {
+                const index = visibleResults.start + offset;
+                const selected = index === selectedIndex;
+                const active = currentTrack?.id === track.id;
+                const prefix = selected ? '>' : ' ';
+                const marker = active ? '♪' : ' ';
+                const line =
+                    `${prefix}${marker} ${String(index + 1).padStart(2, '0')}. ` +
+                    `${track.title} — ${track.artist} ` +
+                    `(${formatDuration(track.durationSec)}) [${sourceLabel(track.source)}]`;
+
+                return h(
+                    Text,
+                    {
+                        key: track.id,
+                        color: active ? 'green' : selected ? 'cyan' : 'white',
+                        bold: selected || active,
+                    },
+                    line,
+                );
+            }),
+            visibleResults.end < results.length ? h(Text, { color: 'gray' }, '...') : null,
+        ),
+
+        currentTrack
+            ? h(
+                  Box,
+                  { flexDirection: 'column', marginBottom: 1 },
+                  h(Text, { color: stateColor, bold: true }, `${spinner} ${stateLabel}`),
+                  h(Text, { color: 'white' }, `Now playing: ${currentTrack.title}`),
+                  h(Text, { color: 'gray' }, `Artist: ${currentTrack.artist} · Source: ${sourceLabel(currentTrack.source)}`),
+                  h(Text, { color: 'green' }, `${progressBar} ${formatTime(cappedElapsed)} / ${formatDuration(durationSec)}`),
+              )
+            : null,
+
+        h(Text, { color: 'yellow' }, statusMessage),
+
+        h(Text, null, ''),
+
+        h(
+            Box,
+            {
+                borderStyle: 'round',
+                borderColor: inputFocused ? 'cyan' : 'gray',
+                paddingX: 1,
+                marginBottom: 1,
+            },
+            h(
+                Box,
+                { flexDirection: 'row' },
+                h(Text, { color: 'cyan' }, '> '),
+                h(TextInput, {
+                    value: query,
+                    onChange: setQuery,
+                    placeholder: 'Type a song name to search',
+                    focus: inputFocused,
+                    showCursor: inputFocused,
+                }),
+            ),
+        ),
+
+        h(
+            Box,
+            { justifyContent: 'space-between' },
+            h(Text, { color: 'gray' }, `- ${footerLeft}`),
+            h(Text, { color: 'cyan' }, footerRight),
+        ),
+
+        h(Text, null, ''),
+
+        h(
+            Box,
+            { flexDirection: 'column' },
+            h(Text, { color: 'gray', bold: true }, 'Activity'),
+            ...activityFeed.map((entry, index) =>
+                h(
+                    Text,
+                    {
+                        key: `${index}-${entry}`,
+                        color: index === 0 ? 'white' : 'gray',
+                    },
+                    `${index === 0 ? '>' : '-'} ${entry}`,
+                ),
+            ),
+        ),
+    );
+};
+
+render(h(App));
