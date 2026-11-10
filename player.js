@@ -240,10 +240,8 @@ const App = () => {
             pushActivity(`Searching: ${trimmed}`);
 
             try {
-                const tracks = await searchTracks(trimmed, {
-                    limit: 10,
-                    signal: controller.signal,
-                });
+                // yt-search can't be cancelled; a newer search makes this one's results ignored below.
+                const tracks = await searchTracks(trimmed, { limit: 10 });
 
                 if (controller.signal.aborted) {
                     return;

@@ -52,11 +52,7 @@ const scoreYouTubeVideo = (video, queryTokens, rawQuery) => {
     return score;
 };
 
-const searchYouTube = async (query, limit, signal) => {
-    if (signal?.aborted) {
-        return [];
-    }
-
+const searchYouTube = async (query, limit) => {
     const result = await yts(query);
     const queryTokens = tokenize(query);
 
@@ -76,11 +72,11 @@ const searchYouTube = async (query, limit, signal) => {
         .map(({ _score, ...track }) => track);
 };
 
-export const searchTracks = async (query, { limit = 12, signal } = {}) => {
+export const searchTracks = async (query, { limit = 12 } = {}) => {
     const trimmed = query.trim();
     if (!trimmed) {
         return [];
     }
 
-    return searchYouTube(trimmed, limit, signal);
+    return searchYouTube(trimmed, limit);
 };
