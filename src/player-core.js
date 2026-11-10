@@ -1,5 +1,3 @@
-export const SUPPORTED_EXTENSIONS = new Set(['.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg']);
-
 export const clamp = (value, min, max) => Math.min(Math.max(value, min), max);
 
 export const wrapIndex = (value, length) => {
@@ -38,33 +36,6 @@ export const makeProgressBar = (elapsedSec, durationSec, width) => {
     return `[${'#'.repeat(filled)}${'-'.repeat(empty)}]`;
 };
 
-export const stripExtension = (fileName) => fileName.replace(/\.[^.]+$/, '');
-
-export const randomIndex = (length, except, random = Math.random) => {
-    if (length <= 1) {
-        return 0;
-    }
-
-    let candidate = Math.floor(random() * length);
-    while (candidate === except) {
-        candidate = Math.floor(random() * length);
-    }
-
-    return candidate;
-};
-
-export const repeatLabel = (mode) => {
-    if (mode === 'all') {
-        return 'ALL';
-    }
-
-    if (mode === 'one') {
-        return 'ONE';
-    }
-
-    return 'OFF';
-};
-
 export const playbackLabel = (isPlaying, isPaused) => {
     if (!isPlaying) {
         return 'STOPPED';
@@ -94,57 +65,4 @@ export const getVisibleTracks = (tracks, selectedIndex, currentIndex, size) => {
         start,
         end,
     };
-};
-
-export const decideNextTrackIndex = ({
-    justFinishedIndex,
-    tracksLength,
-    repeatMode,
-    shuffle,
-    random = Math.random,
-}) => {
-    if (tracksLength <= 0) {
-        return null;
-    }
-
-    if (repeatMode === 'one') {
-        return justFinishedIndex;
-    }
-
-    if (shuffle) {
-        return randomIndex(tracksLength, justFinishedIndex, random);
-    }
-
-    const next = justFinishedIndex + 1;
-    if (next < tracksLength) {
-        return next;
-    }
-
-    if (repeatMode === 'all') {
-        return 0;
-    }
-
-    return null;
-};
-
-export const getPlaybackCandidates = (platform) => {
-    if (platform === 'darwin') {
-        return ['afplay', 'ffplay', 'mpv'];
-    }
-
-    if (platform === 'linux') {
-        return ['ffplay', 'mpv', 'vlc'];
-    }
-
-    return [];
-};
-
-export const pickPlaybackCommand = (candidates, hasCommand) => {
-    for (const candidate of candidates) {
-        if (hasCommand(candidate)) {
-            return candidate;
-        }
-    }
-
-    return null;
 };

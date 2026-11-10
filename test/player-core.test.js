@@ -6,14 +6,8 @@ import {
     formatTime,
     formatDuration,
     makeProgressBar,
-    stripExtension,
-    randomIndex,
-    repeatLabel,
     playbackLabel,
     getVisibleTracks,
-    decideNextTrackIndex,
-    getPlaybackCandidates,
-    pickPlaybackCommand,
 } from '../src/player-core.js';
 
 test('clamp keeps values inside range', () => {
@@ -44,26 +38,7 @@ test('makeProgressBar handles unknown duration and clamps overshoot', () => {
     assert.equal(makeProgressBar(5, 10, 10), '[#####-----]');
 });
 
-test('stripExtension removes only final extension', () => {
-    assert.equal(stripExtension('song.mp3'), 'song');
-    assert.equal(stripExtension('track.final.mix.flac'), 'track.final.mix');
-});
-
-test('randomIndex avoids except when length > 1', () => {
-    const values = [0.2, 0.2, 0.7];
-    let i = 0;
-    const customRandom = () => values[i++ % values.length];
-    const result = randomIndex(4, 0, customRandom);
-    assert.notEqual(result, 0);
-    assert.ok(result >= 0 && result < 4);
-    assert.equal(randomIndex(1, 0), 0);
-});
-
-test('repeatLabel and playbackLabel map states correctly', () => {
-    assert.equal(repeatLabel('off'), 'OFF');
-    assert.equal(repeatLabel('all'), 'ALL');
-    assert.equal(repeatLabel('one'), 'ONE');
-
+test('playbackLabel maps states correctly', () => {
     assert.equal(playbackLabel(false, false), 'STOPPED');
     assert.equal(playbackLabel(true, true), 'PAUSED');
     assert.equal(playbackLabel(true, false), 'PLAYING');
@@ -91,74 +66,4 @@ test('getVisibleTracks centers around selection and clamps bounds', () => {
     const nearBottom = getVisibleTracks(tracks, 19, null, 8);
     assert.equal(nearBottom.start, 12);
     assert.equal(nearBottom.end, 20);
-});
-
-test('decideNextTrackIndex handles repeat and shuffle modes', () => {
-    assert.equal(
-        decideNextTrackIndex({
-            justFinishedIndex: 2,
-            tracksLength: 5,
-            repeatMode: 'one',
-            shuffle: false,
-        }),
-        2
-    );
-
-    assert.equal(
-        decideNextTrackIndex({
-            justFinishedIndex: 4,
-            tracksLength: 5,
-            repeatMode: 'off',
-            shuffle: false,
-        }),
-        null
-    );
-
-    assert.equal(
-        decideNextTrackIndex({
-            justFinishedIndex: 4,
-            tracksLength: 5,
-            repeatMode: 'all',
-            shuffle: false,
-        }),
-        0
-    );
-
-    const shuffled = decideNextTrackIndex({
-        justFinishedIndex: 1,
-        tracksLength: 5,
-        repeatMode: 'off',
-        shuffle: true,
-        random: () => 0.9,
-    });
-
-    assert.notEqual(shuffled, 1);
-    assert.ok(shuffled >= 0 && shuffled < 5);
-
-    assert.equal(
-        decideNextTrackIndex({
-            justFinishedIndex: 0,
-            tracksLength: 0,
-            repeatMode: 'off',
-            shuffle: false,
-        }),
-        null
-    );
-});
-
-test('getPlaybackCandidates returns platform-specific command lists', () => {
-    assert.deepEqual(getPlaybackCandidates('darwin'), ['afplay', 'ffplay', 'mpv']);
-    assert.deepEqual(getPlaybackCandidates('linux'), ['ffplay', 'mpv', 'vlc']);
-    assert.deepEqual(getPlaybackCandidates('win32'), []);
-});
-
-test('pickPlaybackCommand returns first available candidate', () => {
-    const picked = pickPlaybackCommand(['afplay', 'ffplay'], (name) => name === 'ffplay');
-    assert.equal(picked, 'ffplay');
-
-    const firstWins = pickPlaybackCommand(['afplay', 'ffplay', 'mpv'], (name) => name === 'afplay' || name === 'mpv');
-    assert.equal(firstWins, 'afplay');
-
-    const none = pickPlaybackCommand(['afplay', 'ffplay'], () => false);
-    assert.equal(none, null);
 });

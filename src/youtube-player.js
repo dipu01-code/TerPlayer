@@ -1,102 +1,53 @@
-import { spawn } from 'node:child_process';
-import { accessSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { spawn, spawnSync } from 'node:child_process';
 
-import { resolveFfplay } from './ffplay-player.js';
+const YT_DLP_CANDIDATES = ['yt-dlp', '/opt/homebrew/bin/yt-dlp', '/usr/local/bin/yt-dlp'];
 
-const MODULE_DIR = path.dirname(fileURLToPath(import.meta.url));
-const PROJECT_ROOT = path.resolve(MODULE_DIR, '..');
-const YT_DLP = path.join(PROJECT_ROOT, 'node_modules', 'youtube-dl-exec', 'bin', 'yt-dlp');
+let ytDlpBin = null;
 
-const MIN_PLAY_MS = 1500;
+// Bare names live on PATH, so probe by running them instead of checking the file.
+// A miss is not cached, so installing yt-dlp works without restarting the player.
+const resolveYtDlp = () =>
+    (ytDlpBin ??= YT_DLP_CANDIDATES.find((bin) => !spawnSync(bin, ['--version'], { stdio: 'ignore' }).error) ?? null);
 
-export const playYouTube = (videoId, { onEnd, onError } = {}) => {
-    const watchUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const ffplayBin = resolveFfplay();
-    let stopped = false;
-    const startedAt = Date.now();
-
-    const ytdlp = spawn(
-        YT_DLP,
-        ['-f', 'bestaudio/best', '-o', '-', '--no-warnings', '--no-playlist', watchUrl],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
-    );
-
-    const ffplay = spawn(ffplayBin, ['-nodisp', '-autoexit', '-loglevel', 'quiet', '-'], {
-        stdio: ['pipe', 'ignore', 'ignore'],
-    });
-
-    ytdlp.stdout.pipe(ffplay.stdin);
-
-    const stderrChunks = [];
-    ytdlp.stderr.on('data', (chunk) => stderrChunks.push(chunk));
-
-    ytdlp.stdout.on('error', () => {
-        // ffplay closed first while yt-dlp was still piping.
-    });
-
-    ffplay.stdin.on('error', () => {
-        // Pipe closed during stop or stream end.
-    });
-
-    const cleanup = () => {
-        if (!ytdlp.killed) {
-            ytdlp.kill('SIGTERM');
-        }
-
-        if (!ffplay.killed) {
-            ffplay.kill('SIGTERM');
-        }
-    };
-
-    const handle = {
-        stop() {
-            stopped = true;
-            cleanup();
-        },
-    };
-
-    ytdlp.on('error', (error) => {
-        if (stopped) {
+// Downloads the audio into memory (nothing is written to disk). The `audio` package
+// stalls on YouTube's stream URLs, so it gets the bytes instead.
+// `signal` kills yt-dlp, so stopping or switching tracks ends the download.
+export const fetchYouTubeAudio = (videoId, signal) =>
+    new Promise((resolve, reject) => {
+        const bin = resolveYtDlp();
+        if (!bin) {
+            reject(new Error('yt-dlp not found. Install it (e.g. `brew install yt-dlp`) and try again.'));
             return;
         }
 
-        stopped = true;
-        onError?.(error);
+        const proc = spawn(
+            bin,
+            [
+                '-q',
+                '--no-warnings',
+                '--no-playlist',
+                '-f',
+                // m4a piped to stdout skips yt-dlp's container fix-up and won't decode; webm does.
+                'bestaudio[ext=webm]/bestaudio',
+                '-o',
+                '-',
+                `https://www.youtube.com/watch?v=${videoId}`,
+            ],
+            { stdio: ['ignore', 'pipe', 'pipe'], signal },
+        );
+
+        const out = [];
+        const err = [];
+        proc.stdout.on('data', (chunk) => out.push(chunk));
+        proc.stderr.on('data', (chunk) => err.push(chunk));
+        proc.on('error', reject);
+        proc.on('close', (code) => {
+            if (code === 0 && out.length > 0) {
+                resolve(new Uint8Array(Buffer.concat(out)));
+                return;
+            }
+
+            const detail = Buffer.concat(err).toString('utf8').trim().split('\n').at(-1);
+            reject(new Error(`YouTube download failed${detail ? `: ${detail}` : ` (code ${code})`}.`));
+        });
     });
-
-    ffplay.on('error', (error) => {
-        if (stopped) {
-            return;
-        }
-
-        stopped = true;
-        cleanup();
-        onError?.(error);
-    });
-
-    ffplay.on('close', (code, signal) => {
-        if (stopped || signal === 'SIGTERM') {
-            return;
-        }
-
-        cleanup();
-
-        const elapsed = Date.now() - startedAt;
-        if (code === 0 && elapsed >= MIN_PLAY_MS) {
-            onEnd?.();
-            return;
-        }
-
-        const detail = Buffer.concat(stderrChunks).toString('utf8').trim();
-        const reason =
-            elapsed < MIN_PLAY_MS
-                ? 'Stream ended too quickly. Check your internet connection and try another result.'
-                : `Playback stopped (code ${code ?? 'unknown'}).`;
-
-        onError?.(new Error(detail ? `${reason} ${detail.split('\n').at(-1)}` : reason));
-    });
-
-    return handle;
-};

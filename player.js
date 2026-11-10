@@ -22,13 +22,16 @@ import {
     clamp,
     formatDuration,
     formatTime,
+    getVisibleTracks,
     makeProgressBar,
     playbackLabel,
     wrapIndex,
 } from './src/player-core.js';
 
 import { searchTracks } from './src/stream-search.js';
-import { playYouTube } from './src/youtube-player.js';
+import audio from 'audio';
+
+import { fetchYouTubeAudio } from './src/youtube-player.js';
 
 const h = React.createElement;
 
@@ -54,14 +57,6 @@ const TIPS = [
 ];
 
 const sourceLabel = (source) => {
-    if (source === 'audius') {
-        return 'Audius';
-    }
-
-    if (source === 'archive') {
-        return 'Archive';
-    }
-
     if (source === 'youtube') {
         return 'YouTube';
     }
@@ -94,33 +89,26 @@ const App = () => {
     const [activityFeed, setActivityFeed] = useState(['Welcome to the terminal music streamer.']);
 
     const audioRef = useRef(null);
-    const ffplayRef = useRef(null);
-    const progressTimerRef = useRef(null);
-    const playbackStartedAtRef = useRef(0);
+    const downloadAbortRef = useRef(null);
     const searchAbortRef = useRef(null);
     const playTokenRef = useRef(0);
     const manualStopRef = useRef(false);
     const shouldExitRef = useRef(false);
 
-    const clearProgressTimer = useCallback(() => {
-        if (progressTimerRef.current) {
-            clearInterval(progressTimerRef.current);
-            progressTimerRef.current = null;
+    const releasePlayer = useCallback(() => {
+        downloadAbortRef.current?.abort();
+        downloadAbortRef.current = null;
+
+        const player = audioRef.current;
+        audioRef.current = null;
+
+        try {
+            player?.stop();
+            player?.dispose();
+        } catch {
+            // Ignore stop/dispose errors.
         }
     }, []);
-
-    const startProgressTimer = useCallback(
-        (duration) => {
-            clearProgressTimer();
-            playbackStartedAtRef.current = Date.now();
-
-            progressTimerRef.current = setInterval(() => {
-                const elapsed = (Date.now() - playbackStartedAtRef.current) / 1000;
-                setElapsedSec(duration ? clamp(elapsed, 0, duration) : elapsed);
-            }, 250);
-        },
-        [clearProgressTimer],
-    );
 
     const pushActivity = useCallback((message) => {
         setActivityFeed((previous) => [message, ...previous].slice(0, 4));
@@ -129,33 +117,7 @@ const App = () => {
     const stopPlayback = useCallback(() => {
         manualStopRef.current = true;
         playTokenRef.current += 1;
-        clearProgressTimer();
-
-        if (ffplayRef.current) {
-            try {
-                ffplayRef.current.stop();
-            } catch {
-                // Ignore stop errors.
-            }
-
-            ffplayRef.current = null;
-        }
-
-        if (audioRef.current) {
-            try {
-                audioRef.current.stop();
-            } catch {
-                // Ignore stop errors.
-            }
-
-            try {
-                audioRef.current.dispose();
-            } catch {
-                // Ignore dispose errors.
-            }
-
-            audioRef.current = null;
-        }
+        releasePlayer();
 
         setIsPlaying(false);
         setIsPaused(false);
@@ -170,45 +132,20 @@ const App = () => {
                 : 'Playback stopped.',
         );
         pushActivity('Playback stopped.');
-    }, [clearProgressTimer, pushActivity, results.length]);
+    }, [pushActivity, releasePlayer, results.length]);
 
     const playTrack = useCallback(
         async (track) => {
-            if (!track || (track.source !== 'youtube' && !track.streamUrl)) {
+            if (!track?.videoId) {
                 setStatusMessage('This track cannot be played.');
                 return;
             }
 
             const playToken = ++playTokenRef.current;
             manualStopRef.current = false;
-
-            clearProgressTimer();
-
-            if (ffplayRef.current) {
-                try {
-                    ffplayRef.current.stop();
-                } catch {
-                    // Ignore stop errors.
-                }
-
-                ffplayRef.current = null;
-            }
-
-            if (audioRef.current) {
-                try {
-                    audioRef.current.stop();
-                } catch {
-                    // Ignore stop errors.
-                }
-
-                try {
-                    audioRef.current.dispose();
-                } catch {
-                    // Ignore dispose errors.
-                }
-
-                audioRef.current = null;
-            }
+            releasePlayer();
+            const download = new AbortController();
+            downloadAbortRef.current = download;
 
             setCurrentTrack(track);
             setIsPlaying(false);
@@ -220,73 +157,15 @@ const App = () => {
             pushActivity(`Loading stream: ${track.title}`);
 
             try {
-                if (track.source === 'youtube') {
-                    if (!track.videoId) {
-                        throw new Error('Missing YouTube video id.');
-                    }
+                const source = await fetchYouTubeAudio(track.videoId, download.signal);
 
-                    const finalDuration = track.durationSec ?? null;
-
-                    if (playToken !== playTokenRef.current) {
-                        return;
-                    }
-
-                    setDurationSec(finalDuration);
-                    setIsBuffering(false);
-
-                    const handle = playYouTube(track.videoId, {
-                        onEnd: () => {
-                            if (playToken !== playTokenRef.current || manualStopRef.current) {
-                                return;
-                            }
-
-                            clearProgressTimer();
-                            ffplayRef.current = null;
-                            setIsPlaying(false);
-                            setIsPaused(false);
-                            setElapsedSec(0);
-                            setInputFocused(false);
-                            setStatusMessage(
-                                results.length > 0
-                                    ? 'Playback finished. Use ↑/↓ to pick another, Esc to search.'
-                                    : 'Playback finished.',
-                            );
-                            pushActivity('Track finished.');
-                        },
-                        onError: (error) => {
-                            if (playToken !== playTokenRef.current || manualStopRef.current) {
-                                return;
-                            }
-
-                            clearProgressTimer();
-                            ffplayRef.current = null;
-                            setIsPlaying(false);
-                            setIsPaused(false);
-                            setIsBuffering(false);
-                            setCurrentTrack(null);
-                            setInputFocused(false);
-                            setStatusMessage(`Playback error: ${error?.message ?? 'Unable to stream this track.'}`);
-                            pushActivity('Playback failed.');
-                        },
-                    });
-
-                    ffplayRef.current = handle;
-                    setIsPlaying(true);
-                    setIsPaused(false);
-                    setInputFocused(false);
-                    startProgressTimer(finalDuration);
-                    setStatusMessage(`Streaming: ${track.title}`);
-                    pushActivity(`Now playing: ${track.title}`);
+                if (playToken !== playTokenRef.current) {
                     return;
                 }
 
-                if (!track.streamUrl) {
-                    throw new Error('This track does not have a playable stream URL.');
-                }
-
-                const player = audio(track.streamUrl);
+                const player = audio(source);
                 audioRef.current = player;
-
+                // audio crashes if play() starts mid-download, so wait for the full decode first.
                 await player;
 
                 if (playToken !== playTokenRef.current || audioRef.current !== player) {
@@ -295,38 +174,11 @@ const App = () => {
 
                 setDurationSec(player.duration ?? track.durationSec ?? null);
                 setIsBuffering(false);
-                player.play();
-
-                setIsPlaying(true);
-                setIsPaused(false);
-                setInputFocused(false);
-                setStatusMessage(`Streaming: ${track.title}`);
-                pushActivity(`Now playing: ${track.title}`);
 
                 player.on('timeupdate', (currentTime) => {
-                    if (audioRef.current !== player) {
-                        return;
+                    if (audioRef.current === player) {
+                        setElapsedSec(Number(currentTime) || 0);
                     }
-
-                    setElapsedSec(Number(currentTime) || 0);
-                });
-
-                player.on('play', () => {
-                    if (audioRef.current !== player) {
-                        return;
-                    }
-
-                    setIsPlaying(true);
-                    setIsPaused(false);
-                    setIsBuffering(false);
-                });
-
-                player.on('pause', () => {
-                    if (audioRef.current !== player) {
-                        return;
-                    }
-
-                    setIsPaused(true);
                 });
 
                 player.on('ended', () => {
@@ -334,6 +186,7 @@ const App = () => {
                         return;
                     }
 
+                    audioRef.current = null;
                     setIsPlaying(false);
                     setIsPaused(false);
                     setElapsedSec(0);
@@ -345,6 +198,13 @@ const App = () => {
                     );
                     pushActivity('Track finished.');
                 });
+
+                player.play();
+                setIsPlaying(true);
+                setIsPaused(false);
+                setInputFocused(false);
+                setStatusMessage(`Streaming: ${track.title}`);
+                pushActivity(`Now playing: ${track.title}`);
             } catch (error) {
                 if (playToken !== playTokenRef.current) {
                     return;
@@ -359,7 +219,7 @@ const App = () => {
                 pushActivity('Playback failed.');
             }
         },
-        [clearProgressTimer, pushActivity, results.length, startProgressTimer],
+        [pushActivity, releasePlayer, results.length],
     );
 
     const runSearch = useCallback(
@@ -395,7 +255,9 @@ const App = () => {
                 setInputFocused(tracks.length === 0);
 
                 if (tracks.length === 0) {
-                    setStatusMessage(`No streams found for "${trimmed}". Try another spelling or artist name.`);
+                    setStatusMessage(
+                        `No streams found for "${trimmed}" (tracks over 20 min are skipped). Try another spelling or artist name.`,
+                    );
                     pushActivity('No results found.');
                     return;
                 }
@@ -425,19 +287,13 @@ const App = () => {
     );
 
     const togglePause = useCallback(() => {
-        if (ffplayRef.current) {
-            setStatusMessage('Pause is not available for YouTube streams. Press x to stop.');
-            pushActivity('YouTube streams cannot be paused in the terminal player.');
-            return;
-        }
-
         const player = audioRef.current;
         if (!player || isBuffering) {
             return;
         }
 
         if (isPaused) {
-            player.play();
+            player.resume();
             setIsPlaying(true);
             setIsPaused(false);
             setStatusMessage('Resumed playback.');
@@ -468,35 +324,9 @@ const App = () => {
             shouldExitRef.current = true;
             manualStopRef.current = true;
             searchAbortRef.current?.abort();
-            clearProgressTimer();
-
-            if (ffplayRef.current) {
-                try {
-                    ffplayRef.current.stop();
-                } catch {
-                    // Ignore stop errors.
-                }
-
-                ffplayRef.current = null;
-            }
-
-            if (audioRef.current) {
-                try {
-                    audioRef.current.stop();
-                } catch {
-                    // Ignore stop errors.
-                }
-
-                try {
-                    audioRef.current.dispose();
-                } catch {
-                    // Ignore dispose errors.
-                }
-
-                audioRef.current = null;
-            }
+            releasePlayer();
         },
-        [clearProgressTimer],
+        [releasePlayer],
     );
 
     useInput((input, key) => {
@@ -553,20 +383,6 @@ const App = () => {
             return;
         }
 
-        if (
-            input &&
-            input.length === 1 &&
-            !key.ctrl &&
-            !key.meta &&
-            input >= ' ' &&
-            input !== '\t'
-        ) {
-            setInputFocused(true);
-            setQuery(input);
-            setStatusMessage('Search bar active — keep typing and press Enter.');
-            return;
-        }
-
         if (key.tab || input === '/') {
             setInputFocused(true);
             setStatusMessage('Search bar active — type a new song and press Enter.');
@@ -601,28 +417,28 @@ const App = () => {
             shouldExitRef.current = true;
             stopPlayback();
             exit();
+            return;
+        }
+
+        // Last, so Space, x, r and q above keep working as commands.
+        if (
+            input &&
+            input.length === 1 &&
+            !key.ctrl &&
+            !key.meta &&
+            input >= ' ' &&
+            input !== '\t'
+        ) {
+            setInputFocused(true);
+            setQuery(input);
+            setStatusMessage('Search bar active — keep typing and press Enter.');
         }
     });
 
-    const visibleResults = useMemo(() => {
-        if (results.length <= RESULTS_VIEW_SIZE) {
-            return {
-                items: results,
-                start: 0,
-                end: results.length,
-            };
-        }
-
-        let start = selectedIndex - Math.floor(RESULTS_VIEW_SIZE / 2);
-        start = clamp(start, 0, results.length - RESULTS_VIEW_SIZE);
-        const end = start + RESULTS_VIEW_SIZE;
-
-        return {
-            items: results.slice(start, end),
-            start,
-            end,
-        };
-    }, [results, selectedIndex]);
+    const visibleResults = useMemo(
+        () => getVisibleTracks(results, selectedIndex, null, RESULTS_VIEW_SIZE),
+        [results, selectedIndex],
+    );
 
     const cappedElapsed = useMemo(() => {
         if (!durationSec) {

@@ -12,7 +12,11 @@ A terminal-based music player that lets you search and stream music directly fro
 
 ## Installation
 
+Requires [yt-dlp](https://github.com/yt-dlp/yt-dlp) on your PATH (macOS: `brew install yt-dlp`).
+
 Run directly with:
 
 ```bash
 npx terplayer
+
+```
