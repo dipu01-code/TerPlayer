@@ -1,0 +1,11 @@
+# Snyk (https://snyk.io) policy file
+version: v1.25.0
+ignore:
+  SNYK-JS-MINIMATCH-22111072:
+    - 'yt-search > node-fzf > redstar > minimatch':
+        reason: >-
+          False positive. The vulnerable code (firstPhasePreProcess, optimizationLevel)
+          only exists in minimatch 9+; we ship 3.1.5, which has neither. The path is
+          only used by the yt-search CLI and is never loaded by TerPlayer.
+        expires: 2027-11-10T00:00:00.000Z
+patch: {}

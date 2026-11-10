@@ -1,6 +1,6 @@
 {
     "name": "terplayer",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "description": "A terminal-based music player that searches and streams music.",
     "type": "module",
     "main": "player.js",
